@@ -105,6 +105,7 @@ python main.py
 - **Review workflow** - Pending/interview/accepted/rejected with buttons or commands
 - **Persistent views** - Panels/review buttons survive restarts
 - **DM notifications** - Applicants notified on submission and status changes
+- **Usage guide** - See `docs/staff_applications_guide.md` for setup and examples
 
 ### 🎁 Giveaway System
 - **Button-based entry** - Easy participation
