@@ -297,10 +297,9 @@ class Tickets(commands.Cog):
         )
 
         view = TicketCreateView(self)
-        await interaction.channel.send(embed=embed, view=view)
-
         await interaction.response.send_message(
-            embed=EmbedFactory.success("Panel Sent", "Ticket panel created with persistent button!"),
+            embed=embed,
+            view=view,
             ephemeral=True
         )
 

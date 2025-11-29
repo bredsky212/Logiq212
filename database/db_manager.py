@@ -42,6 +42,7 @@ class DatabaseManager:
             self.db = self.client[self.database_name]
             # Test connection
             await self.client.admin.command('ping')
+            await self._ensure_indexes()
             self._connected = True
             logger.info(f"Connected to MongoDB database: {self.database_name}")
         except Exception as e:
@@ -59,6 +60,22 @@ class DatabaseManager:
     def is_connected(self) -> bool:
         """Check if database is connected"""
         return self._connected
+
+    @property
+    def reports(self):
+        """Access reports collection"""
+        return self.db.reports if self.db is not None else None
+
+    async def _ensure_indexes(self) -> None:
+        """Ensure required indexes are present"""
+        if self.db is None:
+            return
+
+        try:
+            await self.db.reports.create_index([("guild_id", 1), ("status", 1)])
+            await self.db.reports.create_index([("reported_user_id", 1), ("guild_id", 1)])
+        except Exception as e:
+            logger.warning(f"Failed to ensure report indexes: {e}")
 
     # User operations
     async def get_user(self, user_id: int, guild_id: int) -> Optional[Dict[str, Any]]:
@@ -173,6 +190,11 @@ class DatabaseManager:
         """Get user warnings"""
         user = await self.get_user(user_id, guild_id)
         return user.get("warnings", []) if user else []
+
+    async def create_report(self, report_data: Dict[str, Any]) -> str:
+        """Create user report"""
+        result = await self.db.reports.insert_one(report_data)
+        return str(result.inserted_id)
 
     # Tickets operations
     async def create_ticket(self, ticket_data: Dict[str, Any]) -> str:

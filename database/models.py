@@ -79,6 +79,42 @@ class Warning:
 
 
 @dataclass
+class Report:
+    """User report model"""
+    guild_id: int
+    reporter_id: int
+    reported_user_id: int
+    category: str
+    reason: str
+    message_link: Optional[str] = None
+    message_id: Optional[int] = None
+    channel_id: Optional[int] = None
+    status: str = "open"
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    resolved_at: Optional[datetime] = None
+    resolved_by_id: Optional[int] = None
+    moderation_action: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            "guild_id": self.guild_id,
+            "reporter_id": self.reporter_id,
+            "reported_user_id": self.reported_user_id,
+            "category": self.category,
+            "reason": self.reason,
+            "message_link": self.message_link,
+            "message_id": self.message_id,
+            "channel_id": self.channel_id,
+            "status": self.status,
+            "created_at": self.created_at,
+            "resolved_at": self.resolved_at,
+            "resolved_by_id": self.resolved_by_id,
+            "moderation_action": self.moderation_action
+        }
+
+
+@dataclass
 class Ticket:
     """Support ticket model"""
     ticket_id: str

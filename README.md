@@ -89,6 +89,7 @@ python main.py
 
 ### 🛡️ Advanced Moderation
 - **Warn system** - Track user warnings
+- **User reports** - Members can file `/report` with category, reason, and message link
 - **Timeout** - Temporary mutes
 - **Kick & Ban** - Standard moderation
 - **Auto-moderation** - Spam detection
@@ -196,6 +197,7 @@ ENVIRONMENT=production
 - `/rank [user]` - View rank card
 - `/balance [user]` - Check balance
 - `/leaderboard` - View server leaderboard
+- `/report <user> <category> <reason> [message_link]` - Report a user to moderators (guild-only)
 
 ### 🔧 ADMIN COMMANDS (Administrators only)
 
@@ -297,6 +299,13 @@ ENVIRONMENT=production
 - `/lock [channel]` - Lock channel
 - `/unlock [channel]` - Unlock channel
 - `/nickname <user> [nickname]` - Change nickname
+
+## 📝 Reporting Users (/report)
+
+- Configure a moderation log channel once with `/setlogchannel <channel>` so reports notify staff.
+- Members can file `/report <user> <category> <reason> [message_link]` in a server (reason must be 10-512 characters; 60s per-user cooldown).
+- Optional message links are parsed and fetched when possible; the raw link is still stored if fetching fails.
+- Reports are stored in MongoDB (`reports` collection) and send an embed to the log channel when configured; reporters always get an ephemeral confirmation.
 
 ---
 

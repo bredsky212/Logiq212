@@ -3,9 +3,10 @@ Unit tests for database manager
 """
 
 import pytest
-import asyncio
 from database.db_manager import DatabaseManager
-from database.models import User, Guild
+from database.models import Report
+from bson import ObjectId
+from datetime import datetime
 
 
 @pytest.fixture
@@ -85,6 +86,31 @@ async def test_leaderboard(db_manager):
     leaderboard = await db_manager.get_leaderboard(guild_id, limit=5)
     assert len(leaderboard) == 5
     assert leaderboard[0]['xp'] > leaderboard[-1]['xp']  # Should be sorted
+
+
+@pytest.mark.asyncio
+async def test_report_creation(db_manager):
+    """Test report creation and storage"""
+    report = Report(
+        guild_id=111,
+        reporter_id=222,
+        reported_user_id=333,
+        category="spam",
+        reason="Test report reason data",
+        message_link="https://discord.com/channels/111/222/333",
+        message_id=333,
+        channel_id=222,
+        created_at=datetime.utcnow()
+    )
+
+    report_id = await db_manager.create_report(report.to_dict())
+    assert isinstance(report_id, str)
+
+    stored = await db_manager.db.reports.find_one({"_id": ObjectId(report_id)})
+    assert stored is not None
+    assert stored["guild_id"] == report.guild_id
+    assert stored["reporter_id"] == report.reporter_id
+    assert stored["status"] == "open"
 
 
 if __name__ == '__main__':
