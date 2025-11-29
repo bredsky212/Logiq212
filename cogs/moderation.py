@@ -8,16 +8,21 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta
 from typing import Optional
+import re
 import logging
-import asyncio
 
 from utils.embeds import EmbedFactory, EmbedColor
 from utils.permissions import is_moderator, PermissionChecker
 from utils.converters import TimeConverter
 from database.db_manager import DatabaseManager
-from database.models import Warning
+from database.models import Warning, Report
 
 logger = logging.getLogger(__name__)
+
+MESSAGE_LINK_REGEX = re.compile(
+    r"https?://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/channels/"
+    r"(?P<guild_id>\d+)/(?P<channel_id>\d+)/(?P<message_id>\d+)"
+)
 
 
 class Moderation(commands.Cog):
@@ -30,6 +35,7 @@ class Moderation(commands.Cog):
         self.module_config = config.get('modules', {}).get('moderation', {})
         self.spam_tracker = {}  # Track spam
         self.toxicity_filter_enabled = self.module_config.get('auto_mod', {}).get('toxicity_filter', True)
+        self.report_cooldowns = {}
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -83,6 +89,143 @@ class Moderation(commands.Cog):
                 logger.info(f"Auto-muted {message.author} for spam")
             except discord.Forbidden:
                 pass
+
+    @app_commands.command(name="report", description="Report a user to the moderation team")
+    @app_commands.describe(
+        user="User you want to report",
+        category="Type of issue (spam, harassment, etc.)",
+        reason="Explain what happened (10-512 characters)",
+        message_link="Optional link to the offending message"
+    )
+    @app_commands.choices(
+        category=[
+            app_commands.Choice(name="Spam", value="spam"),
+            app_commands.Choice(name="Harassment", value="harassment"),
+            app_commands.Choice(name="Hate", value="hate"),
+            app_commands.Choice(name="NSFW", value="nsfw"),
+            app_commands.Choice(name="Scam", value="scam"),
+            app_commands.Choice(name="Other", value="other"),
+        ]
+    )
+    async def report(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        category: app_commands.Choice[str],
+        reason: str,
+        message_link: Optional[str] = None
+    ):
+        """Allow members to submit a structured report"""
+        if not interaction.guild:
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Guild Only", "This command can only be used inside a server."),
+                ephemeral=True
+            )
+            return
+
+        reason_text = reason.strip()
+        if len(reason_text) < 10 or len(reason_text) > 512:
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Invalid Reason", "Reason must be between 10 and 512 characters."),
+                ephemeral=True
+            )
+            return
+
+        now = datetime.utcnow().timestamp()
+        last_used = self.report_cooldowns.get(interaction.user.id)
+        if last_used and now - last_used < 60:
+            retry_after = int(60 - (now - last_used))
+            await interaction.response.send_message(
+                embed=EmbedFactory.warning(
+                    "Slow Down",
+                    f"Please wait {retry_after} seconds before sending another report."
+                ),
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        message_link_value = message_link.strip() if message_link else None
+        parsed_link = self._parse_message_link(message_link_value) if message_link_value else None
+        message_id = None
+        channel_id = interaction.channel_id
+        fetched_message: Optional[discord.Message] = None
+        message_fetch_error: Optional[str] = None
+
+        if parsed_link:
+            link_guild_id, link_channel_id, link_message_id = parsed_link
+            if link_guild_id != interaction.guild.id:
+                message_fetch_error = "Message link is from a different server."
+            else:
+                channel_id = link_channel_id
+                message_id = link_message_id
+                channel = interaction.guild.get_channel(link_channel_id)
+
+                if not channel:
+                    try:
+                        channel = await interaction.guild.fetch_channel(link_channel_id)
+                    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                        channel = None
+
+                if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                    try:
+                        fetched_message = await channel.fetch_message(link_message_id)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        message_fetch_error = "Message could not be fetched; it may be invalid or permission-restricted."
+                else:
+                    message_fetch_error = "Message could not be fetched; it may be invalid or permission-restricted."
+        elif message_link_value:
+            message_fetch_error = "Message link could not be parsed. It will be stored as provided."
+
+        report = Report(
+            guild_id=interaction.guild.id,
+            reporter_id=interaction.user.id,
+            reported_user_id=user.id,
+            category=category.value,
+            reason=reason_text,
+            message_link=message_link_value,
+            message_id=message_id,
+            channel_id=channel_id,
+        )
+
+        try:
+            report_id = await self.db.create_report(report.to_dict())
+        except Exception as e:
+            logger.error(f"Failed to create report for guild {interaction.guild.id}: {e}", exc_info=True)
+            await interaction.followup.send(
+                embed=EmbedFactory.error(
+                    "Report Failed",
+                    "Something went wrong while recording your report. Please try again later or contact a moderator directly."
+                ),
+                ephemeral=True
+            )
+            return
+
+        self.report_cooldowns[interaction.user.id] = now
+
+        embed = self._build_report_embed(
+            interaction,
+            user,
+            report,
+            report_id,
+            fetched_message,
+            message_fetch_error
+        )
+        log_sent = await self._send_report_log(interaction.guild, embed)
+
+        if log_sent:
+            confirmation_embed = EmbedFactory.success(
+                "Report Received",
+                "Your report has been sent to the moderation team. Thank you for helping keep the server safe."
+            )
+        else:
+            confirmation_embed = EmbedFactory.warning(
+                "Report Recorded",
+                "Your report has been recorded, but no moderation log channel is configured. Please ask an admin to run /setlogchannel."
+            )
+
+        await interaction.followup.send(embed=confirmation_embed, ephemeral=True)
 
     @app_commands.command(name="warn", description="Warn a user")
     @app_commands.describe(
@@ -574,6 +717,105 @@ class Moderation(commands.Cog):
                 embed=EmbedFactory.error("Error", "I don't have permission to change this user's nickname"),
                 ephemeral=True
             )
+
+    def _parse_message_link(self, link: str) -> Optional[tuple[int, int, int]]:
+        """Extract IDs from a Discord message link"""
+        match = MESSAGE_LINK_REGEX.match(link)
+        if not match:
+            return None
+
+        try:
+            guild_id = int(match.group("guild_id"))
+            channel_id = int(match.group("channel_id"))
+            message_id = int(match.group("message_id"))
+            return guild_id, channel_id, message_id
+        except (TypeError, ValueError):
+            return None
+
+    async def _get_log_channel(self, guild: discord.Guild) -> Optional[discord.abc.Messageable]:
+        """Fetch the configured log channel if available"""
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return None
+
+        log_channel_id = guild_config.get('log_channel')
+        if not log_channel_id:
+            return None
+
+        log_channel = guild.get_channel(log_channel_id)
+        if not log_channel:
+            try:
+                log_channel = await guild.fetch_channel(log_channel_id)
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                return None
+
+        return log_channel
+
+    async def _send_report_log(self, guild: discord.Guild, embed: discord.Embed) -> bool:
+        """Send report embed to the configured log channel"""
+        log_channel = await self._get_log_channel(guild)
+        if not log_channel:
+            return False
+
+        try:
+            await log_channel.send(embed=embed)
+            return True
+        except discord.Forbidden:
+            logger.warning(f"Cannot send report log to channel {log_channel} in {guild}")
+        except discord.HTTPException as e:
+            logger.warning(f"Failed to send report log in {guild}: {e}")
+
+        return False
+
+    def _build_report_embed(
+        self,
+        interaction: discord.Interaction,
+        reported_user: discord.Member,
+        report: Report,
+        report_id: str,
+        fetched_message: Optional[discord.Message],
+        message_fetch_error: Optional[str]
+    ) -> discord.Embed:
+        """Construct embed for moderator log"""
+        reporter_label = f"{interaction.user.mention} ({interaction.user.id})"
+        if interaction.user.id == reported_user.id:
+            reporter_label += " (self-report)"
+
+        channel_value = f"<#{report.channel_id}>" if report.channel_id else "Unknown"
+
+        message_value = "No message link provided."
+        if fetched_message:
+            preview = fetched_message.content or "[no text content]"
+            if len(preview) > 500:
+                preview = f"{preview[:497]}..."
+
+            jump_link = report.message_link or fetched_message.jump_url
+            message_value = f"{preview}\n[Jump to message]({jump_link})"
+            if fetched_message.attachments:
+                message_value += f"\nAttachments: {len(fetched_message.attachments)}"
+        elif report.message_link:
+            message_value = report.message_link
+            if message_fetch_error:
+                message_value += f"\n{message_fetch_error}"
+        elif message_fetch_error:
+            message_value = message_fetch_error
+
+        embed = EmbedFactory.create(
+            title="New User Report",
+            color=EmbedColor.WARNING,
+            fields=[
+                {"name": "Reporter", "value": reporter_label, "inline": True},
+                {"name": "Reported User", "value": f"{reported_user.mention} ({reported_user.id})", "inline": True},
+                {"name": "Category", "value": report.category, "inline": True},
+                {"name": "Reason", "value": report.reason, "inline": False},
+                {"name": "Channel", "value": channel_value, "inline": True},
+                {"name": "Guild", "value": f"{interaction.guild.name} ({interaction.guild.id})", "inline": True},
+                {"name": "Message", "value": message_value, "inline": False},
+                {"name": "Report ID", "value": report_id, "inline": True}
+            ]
+        )
+
+        return embed
 
     async def _log_action(self, guild: discord.Guild, embed: discord.Embed):
         """Log moderation action to log channel"""
