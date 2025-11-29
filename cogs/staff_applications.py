@@ -206,7 +206,7 @@ class StaffApplications(commands.Cog):
                     self.bot.add_view(StaffApplyView(self, tpl["template_id"]))
 
             # Register review views for active applications
-            if self.db.staff_applications:
+            if self.db.staff_applications is not None:
                 cursor = self.db.staff_applications.find({
                     "status": {"$in": ["pending", "interview", "accepted", "rejected"]},
                     "review_message_id": {"$ne": 0}
