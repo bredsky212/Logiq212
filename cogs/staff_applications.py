@@ -29,6 +29,11 @@ def _truncate(text: str, limit: int = 1024) -> str:
     return text if len(text) <= limit else f"{text[: limit - 3]}..."
 
 
+def _shorten(text: str, limit: int) -> str:
+    """Hard truncate a string to a limit with ellipsis if needed"""
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+
 class StaffApplyView(discord.ui.View):
     """Persistent view for Apply panel"""
 
@@ -101,7 +106,8 @@ class StaffApplicationModal(discord.ui.Modal):
     """Modal shown to applicants"""
 
     def __init__(self, cog: "StaffApplications", template: StaffApplicationTemplate):
-        super().__init__(title=f"{template.name} Application")
+        modal_title = _shorten(f"{template.name} Application", 45)
+        super().__init__(title=modal_title)
         self.cog = cog
         self.template = template
         self.inputs: Dict[str, discord.ui.TextInput] = {}
@@ -109,8 +115,8 @@ class StaffApplicationModal(discord.ui.Modal):
         for field in template.fields:
             style = discord.TextStyle.short if field.style == "short" else discord.TextStyle.paragraph
             text_input = discord.ui.TextInput(
-                label=field.label,
-                placeholder=field.placeholder or discord.utils.MISSING,
+                label=_shorten(field.label, 45),
+                placeholder=_shorten(field.placeholder, 100) if field.placeholder else discord.utils.MISSING,
                 required=field.required,
                 max_length=field.max_length,
                 style=style,
