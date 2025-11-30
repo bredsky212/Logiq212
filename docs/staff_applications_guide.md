@@ -20,6 +20,10 @@ Creators configure templates; reviewers process applications.
 /staffapp config add-reviewer-role role:@StaffSelect
 /staffapp config add-reviewer-role role:@StaffMod
 ```
+3) Optional: set a default apply channel (used if a template omits apply_channel):
+```
+/staffapp config set-apply-channel channel:#apply-here
+```
 3) Check current config:
 ```
 /staffapp config show
@@ -33,12 +37,13 @@ Example:
 /staffapp template create
     name: "Design Team"
     team_role: @Design           # optional
-    apply_channel: #apply-design
+    apply_channel: #apply-design # optional if default is set
     review_channel: #design-apps
-    description: "Tell us about your design experience."
+    description: "Tell us about your design experience.\nList tools you use."
 ```
+- Descriptions accept `\n` for new lines.
 - Default fields: Motivation, Experience, Availability/Timezone, Age/Basic info (max 5 fields enforced).
-- The bot posts an embed with an **Apply** button in `#apply-design`.
+- The bot posts an embed with an **Apply** button in `#apply-design` (or the default apply channel).
 - Users click **Apply**, fill the modal, and get an ephemeral confirmation. Their application goes to `#design-apps`.
 
 ## Step 3: Process applications
