@@ -107,6 +107,12 @@ python main.py
 - **DM notifications** - Applicants notified on submission and status changes
 - **Usage guide** - See `docs/staff_applications_guide.md` for setup and examples
 
+### 🛡️ Fine-Grained Permissions & VC Moderation
+- **Feature keys** - Allow/deny bot features per role without bypassing Discord perms
+- **/perms management** - Admin/Manage Guild can allow/deny/reset features
+- **VC suspension** - `/vcmod` commands for 2h/4h/12h timeouts with hierarchy checks
+- **Logging** - All actions reuse the existing moderation log channel
+
 ### 🎁 Giveaway System
 - **Button-based entry** - Easy participation
 - **Multiple winners** - Support for multiple winners
@@ -295,6 +301,13 @@ ENVIRONMENT=production
 - `/reload <cog>` - Reload cog
 - `/sync` - Sync commands
 - `/setlogchannel <channel>` - Set log channel
+- `/perms feature-list` - View feature permission overrides
+- `/perms feature-allow|feature-deny|feature-clear|feature-reset` - Configure feature permissions
+
+#### VC Moderation
+- `/vcmod suspend <user> <duration> [reason]` - Timeout a user for 2h/4h/12h (ephemeral response, logged)
+- `/vcmod unsuspend <user> [reason]` - Remove timeout early
+- `/vcmod status <user>` - View current/last suspensions
 
 #### Staff Applications
 - `/staffapp config set-creator-role <role>` - Set creator role (admins only)
