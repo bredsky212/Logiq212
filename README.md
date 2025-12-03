@@ -112,6 +112,7 @@ python main.py
 - **/perms management** - Admin/Manage Guild can allow/deny/reset features
 - **VC suspension** - `/vcmod` commands for 2h/4h/12h timeouts with hierarchy checks
 - **Logging** - All actions reuse the existing moderation log channel
+- **Usage guide** - See `docs/permissions_vcmod_guide.md` for setup and examples
 
 ### 🎁 Giveaway System
 - **Button-based entry** - Easy participation
