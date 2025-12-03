@@ -73,6 +73,24 @@ class Logiq(commands.Bot):
         # Load cogs
         await self.load_cogs()
 
+        async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+            self.logger.error(
+                "App command error in %s: %r",
+                getattr(interaction.command, "qualified_name", "unknown"),
+                error,
+                exc_info=True,
+            )
+            try:
+                msg = "❌ An internal error occurred while handling this command."
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                self.logger.exception("Failed to send app command error response")
+
+        self.tree.on_error = on_tree_error
+
     async def load_cogs(self):
         """Load all cogs from cogs directory"""
         cogs_dir = Path(__file__).parent / 'cogs'

@@ -110,8 +110,14 @@ class FeaturePermissions(commands.Cog):
     @perms.command(name="feature-reset", description="Reset feature permissions to default")
     @app_commands.choices(feature=[app_commands.Choice(name=k.value, value=k.value) for k in FeatureKey])
     async def feature_reset(self, interaction: discord.Interaction, feature: app_commands.Choice[str]):
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            logger.exception("Failed to defer perms feature-reset")
+            return
+
         if not _is_config_admin(interaction.user):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("No Permission", "Only Admin/Manage Guild can change permissions."),
                 ephemeral=True
             )
@@ -130,7 +136,7 @@ class FeaturePermissions(commands.Cog):
         )
 
         embed = EmbedFactory.success("Feature Reset", f"{feature.value} reset to default.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         await self._log_to_mod(interaction.guild, EmbedFactory.create(
             title="Feature Permissions Reset",
             description=f"{feature.value} reset by {interaction.user.mention}",
@@ -138,8 +144,15 @@ class FeaturePermissions(commands.Cog):
         ))
 
     async def _update_feature(self, interaction: discord.Interaction, feature_key: str, role: discord.Role, action: str):
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer(ephemeral=True, thinking=True)
+            except Exception:
+                logger.exception("Failed to defer perms _update_feature")
+                return
+
         if not _is_config_admin(interaction.user):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("No Permission", "Only Admin/Manage Guild can change permissions."),
                 ephemeral=True
             )
@@ -148,7 +161,7 @@ class FeaturePermissions(commands.Cog):
         try:
             feature_enum = FeatureKey(feature_key)
         except ValueError:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid Feature", "Unknown feature key."),
                 ephemeral=True
             )
@@ -168,25 +181,36 @@ class FeaturePermissions(commands.Cog):
             allowed.discard(role.id)
             denied.discard(role.id)
 
-        new_doc = await self.db.upsert_feature_permission(
-            interaction.guild.id,
-            feature_key,
-            {
-                "allowed_roles": list(allowed),
-                "denied_roles": list(denied),
-                "updated_by": interaction.user.id,
-            }
-        )
+        try:
+            new_doc = await self.db.upsert_feature_permission(
+                interaction.guild.id,
+                feature_key,
+                {
+                    "allowed_roles": list(allowed),
+                    "denied_roles": list(denied),
+                    "updated_by": interaction.user.id,
+                }
+            )
+        except Exception:
+            logger.exception("upsert_feature_permission failed for %s", feature_key)
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Error", "Failed to save feature permission. Check server logs."),
+                ephemeral=True
+            )
+            return
 
-        await self.manager.audit_change(
-            interaction.guild.id,
-            feature_enum,
-            interaction.user.id,
-            action,
-            role.id,
-            old_doc,
-            new_doc
-        )
+        try:
+            await self.manager.audit_change(
+                interaction.guild.id,
+                feature_enum,
+                interaction.user.id,
+                action,
+                role.id,
+                old_doc,
+                new_doc
+            )
+        except Exception:
+            logger.exception("audit_change failed for %s", feature_key)
 
         allowed_text = ", ".join(f"<@&{r}>" for r in new_doc.get("allowed_roles", [])) or "None"
         denied_text = ", ".join(f"<@&{r}>" for r in new_doc.get("denied_roles", [])) or "None"
@@ -196,7 +220,7 @@ class FeaturePermissions(commands.Cog):
             description=f"**Feature:** {feature_key}\n**Allowed:** {allowed_text}\n**Denied:** {denied_text}",
             color=EmbedColor.INFO
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
         log_embed = EmbedFactory.create(
             title="Feature Permissions Updated",

@@ -83,6 +83,15 @@ class VCMod(commands.Cog):
         ]
     )
     async def suspend(self, interaction: discord.Interaction, user: discord.Member, duration: app_commands.Choice[str], reason: str = "No reason provided"):
+        logger.info(
+            "vcmod suspend invoked by user=%s (%s) target=%s (%s) guild=%s duration=%s",
+            interaction.user,
+            interaction.user.id,
+            user,
+            user.id,
+            interaction.guild_id,
+            duration.value,
+        )
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
         except Exception:
@@ -176,6 +185,14 @@ class VCMod(commands.Cog):
         reason="Reason for unsuspending"
     )
     async def unsuspend(self, interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+        logger.info(
+            "vcmod unsuspend invoked by user=%s (%s) target=%s (%s) guild=%s",
+            interaction.user,
+            interaction.user.id,
+            user,
+            user.id,
+            interaction.guild_id,
+        )
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
         except Exception:
