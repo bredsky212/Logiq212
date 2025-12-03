@@ -41,6 +41,13 @@ Removes overrides; falls back to base checks.
 
 All changes are logged to the mod log channel and stored in an audit collection.
 
+### Common feature keys by area
+- Staff applications: `staffapp.template.manage` (config/templates), `staffapp.review` (queue/status/buttons)
+- Tickets: `tickets.admin` (setup/panel/list), `tickets.close` (staff closes); `tickets.create` optional
+- Moderation: `mod.warn`, `mod.warnings`, `mod.timeout`, `mod.kick`, `mod.ban`, `mod.clear`, `mod.slowmode`, `mod.lock`, `mod.nickname`
+- VC moderation: `mod.vc_suspend`, `mod.vc_unsuspend`
+- Default behavior: if no overrides are set, commands behave as before.
+
 ## Part 2: VC Moderation (Timeout/Suspension)
 VC suspension uses Discord’s timeout (communication disable) and offers fixed durations: 2h, 4h, 12h. Responses to moderators are ephemeral; full details go to the mod log.
 
