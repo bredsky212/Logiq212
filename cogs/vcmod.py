@@ -328,9 +328,10 @@ class VCMod(commands.Cog):
 
 async def setup(bot: commands.Bot):
     """Setup function for cog loading"""
-    await bot.add_cog(VCMod(bot, bot.db))
+    cog = VCMod(bot, bot.db)
+    await bot.add_cog(cog)
 
     existing = bot.tree.get_command("vcmod")
     if existing:
         bot.tree.remove_command("vcmod", type=discord.AppCommandType.chat_input)
-    bot.tree.add_command(VCMod.vcmod)
+    bot.tree.add_command(cog.vcmod)

@@ -250,9 +250,10 @@ class FeaturePermissions(commands.Cog):
 
 async def setup(bot: commands.Bot):
     """Setup function for cog loading"""
-    await bot.add_cog(FeaturePermissions(bot, bot.db))
+    cog = FeaturePermissions(bot, bot.db)
+    await bot.add_cog(cog)
 
     existing = bot.tree.get_command("perms")
     if existing:
         bot.tree.remove_command("perms", type=discord.AppCommandType.chat_input)
-    bot.tree.add_command(FeaturePermissions.perms)
+    bot.tree.add_command(cog.perms)
