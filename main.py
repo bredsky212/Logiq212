@@ -123,6 +123,36 @@ class Logiq(commands.Bot):
 
         self.tree.on_error = on_tree_error
 
+    @commands.command(name="sync")
+    @commands.is_owner()
+    async def sync_commands(self, ctx: commands.Context, spec: str | None = None):
+        """
+        Owner-only helper to resync application commands.
+
+        Usage:
+          !sync            -> global sync (can take time to propagate)
+          !sync ~          -> sync this guild only
+          !sync *          -> copy globals to this guild, then sync
+          !sync ^          -> clear this guild's commands, then sync from globals
+        """
+        tree = self.tree
+        guild = ctx.guild
+
+        if spec == "~":
+            synced = await tree.sync(guild=guild)
+            await ctx.send(f"✅ Synced {len(synced)} commands to this guild (~).")
+        elif spec == "*":
+            tree.copy_global_to(guild=guild)
+            synced = await tree.sync(guild=guild)
+            await ctx.send(f"✅ Copied globals and synced {len(synced)} commands to this guild (*).")
+        elif spec == "^":
+            tree.clear_commands(guild=guild)
+            synced = await tree.sync(guild=guild)
+            await ctx.send(f"✅ Cleared and synced {len(synced)} commands for this guild (^).")
+        else:
+            synced = await tree.sync()
+            await ctx.send(f"✅ Globally synced {len(synced)} commands.")
+
     async def load_cogs(self):
         """Load all cogs from cogs directory"""
         cogs_dir = Path(__file__).parent / 'cogs'
