@@ -9,6 +9,7 @@ from typing import Optional, Dict
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.utils import utcnow
 
 from database.db_manager import DatabaseManager
 from database.models import FeatureKey, Suspension
@@ -122,10 +123,12 @@ class VCMod(commands.Cog):
                 return
 
             seconds = self._duration_seconds(duration.value)
-            ends_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            delta = timedelta(seconds=seconds)
+            started_at = utcnow()
+            ends_at = started_at + delta
 
             try:
-                await user.edit(communication_disabled_until=ends_at, reason=reason)
+                await user.timeout(delta, reason=reason)
             except discord.Forbidden:
                 await interaction.followup.send(
                     embed=EmbedFactory.error("Error", "I don't have permission to timeout that user."),
@@ -230,7 +233,7 @@ class VCMod(commands.Cog):
                 return
 
             try:
-                await user.edit(communication_disabled_until=None, reason=reason)
+                await user.timeout(None, reason=reason)
             except discord.Forbidden:
                 await interaction.followup.send(
                     embed=EmbedFactory.error("Error", "I don't have permission to modify that user."),
