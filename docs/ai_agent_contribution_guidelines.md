@@ -52,7 +52,7 @@ maintainable._
           self.bot = bot
           self.db = db
           self.perms = bot.perms  # shared FeaturePermissionManager
-````
+  ```
 
 * Cogs must subclass `commands.Cog`.
 * Cogs should keep **minimal state**; long-lived data belongs in MongoDB.
