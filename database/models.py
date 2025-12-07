@@ -447,45 +447,6 @@ class FeatureKey(str, Enum):
     # Analytics
     ANALYTICS_VIEW = "analytics.view"
 
-    # Verification
-    VERIFY_CONFIG = "verify.config"
-
-    # Games
-    GAMES_PANEL_MANAGE = "games.panel.manage"
-
-    # Roles
-    ROLES_MENU_MANAGE = "roles.menu.manage"
-    ROLES_FORCE_ASSIGN = "roles.force.assign"
-
-    # Economy
-    ECONOMY_ADMIN_ADJUST = "economy.admin.adjust"
-
-    # Leveling
-    LEVELING_ADMIN_SET = "leveling.admin.set"
-    LEVELING_ADMIN_RESET = "leveling.admin.reset"
-
-    # Giveaways
-    GIVEAWAY_CREATE = "giveaway.create"
-    GIVEAWAY_MANAGE = "giveaway.manage"
-
-    # Music
-    MUSIC_DJ_BASIC = "music.dj.basic"
-    MUSIC_DJ_VOLUME = "music.dj.volume"
-
-    # Social alerts
-    ALERTS_MANAGE = "alerts.manage"
-    ALERTS_VIEW = "alerts.view"
-
-    # Temporary voice
-    TEMPVOICE_SETUP = "tempvoice.setup"
-    TEMPVOICE_OWNER_POWER = "tempvoice.owner.power"
-
-    # Utility
-    UTILITY_POLL = "utility.poll"
-
-    # Analytics
-    ANALYTICS_VIEW = "analytics.view"
-
 
 @dataclass
 class FeaturePermission:
