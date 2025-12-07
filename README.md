@@ -129,6 +129,27 @@ python main.py
 - Protected roles (detected automatically: administrator/manage_guild) and the guild owner cannot be targeted by destructive actions or have roles assigned/removed by the bot.
 - Manage protected roles with `/perms security-protected-add|remove|list`; keep at least one protected role.
 
+## ⚙️ Config-Driven Modules
+- All cogs load by default. Add a `modules` block in `config.yaml` to selectively enable/disable cogs by file name:
+  ```yaml
+  modules:
+    tickets:
+      enabled: true
+    moderation:
+      enabled: true
+    report:
+      enabled: true
+    vcmod:
+      enabled: true
+    feature_permissions:
+      enabled: true
+    games:
+      enabled: false
+    music:
+      enabled: false
+  ```
+- Missing entries default to `enabled: true` for backward compatibility. Skipped cogs log as “Skipping cog <name> (disabled in config.modules)”.
+
 ### 🎁 Giveaway System
 - **Button-based entry** - Easy participation
 - **Multiple winners** - Support for multiple winners
