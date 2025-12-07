@@ -15,7 +15,9 @@ from utils.embeds import EmbedFactory, EmbedColor
 from utils.permissions import is_moderator, PermissionChecker
 from utils.converters import TimeConverter
 from database.db_manager import DatabaseManager
-from database.models import Warning, Report
+from database.models import Warning, Report, FeatureKey
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,8 @@ class Moderation(commands.Cog):
         self.spam_tracker = {}  # Track spam
         self.toxicity_filter_enabled = self.module_config.get('auto_mod', {}).get('toxicity_filter', True)
         self.report_cooldowns = {}
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -89,6 +93,39 @@ class Moderation(commands.Cog):
                 logger.info(f"Auto-muted {message.author} for spam")
             except discord.Forbidden:
                 pass
+
+    def _base_mod_check(
+        self,
+        moderator: discord.Member,
+        target: Optional[discord.Member] = None,
+        required_permissions: Optional[list[str]] = None,
+    ) -> bool:
+        """Base moderation check with admin/owner bypass, permissions, and hierarchy."""
+        if moderator.guild_permissions.administrator or moderator == moderator.guild.owner:
+            return True
+
+        if required_permissions:
+            missing = PermissionChecker.get_missing_permissions(moderator, required_permissions)
+            if missing:
+                return False
+
+        if target is not None:
+            can_moderate, _error = PermissionChecker.can_moderate(moderator, target)
+            if not can_moderate:
+                return False
+
+        return True
+
+    async def _maybe_log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, interaction.command.qualified_name if interaction.command else "moderation", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_action(interaction.guild, embed)
 
     @app_commands.command(name="report", description="Report a user to the moderation team")
     @app_commands.describe(
@@ -240,12 +277,17 @@ class Moderation(commands.Cog):
         reason: str
     ):
         """Warn a user"""
-        can_moderate, error = PermissionChecker.can_moderate(interaction.user, user)
-        if not can_moderate:
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_WARN,
+            base_check=lambda m: self._base_mod_check(m, user, [])
+        )
+        if not allowed:
             await interaction.response.send_message(
-                embed=EmbedFactory.error("Cannot Warn", error),
+                embed=EmbedFactory.error("No Permission", "You cannot warn this user."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_WARN, "warn")
             return
 
         # Create warning
@@ -289,6 +331,18 @@ class Moderation(commands.Cog):
     @is_moderator()
     async def warnings(self, interaction: discord.Interaction, user: discord.Member):
         """View user warnings"""
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_WARNINGS,
+            base_check=lambda m: self._base_mod_check(m, user, [])
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot view warnings for this user."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_WARNINGS, "warnings")
+            return
         warnings = await self.db.get_warnings(user.id, interaction.guild.id)
 
         if not warnings:
@@ -330,12 +384,17 @@ class Moderation(commands.Cog):
         reason: str = "No reason provided"
     ):
         """Timeout a user"""
-        can_moderate, error = PermissionChecker.can_moderate(interaction.user, user)
-        if not can_moderate:
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_TIMEOUT,
+            base_check=lambda m: self._base_mod_check(m, user, ["moderate_members"])
+        )
+        if not allowed:
             await interaction.response.send_message(
-                embed=EmbedFactory.error("Cannot Timeout", error),
+                embed=EmbedFactory.error("No Permission", "You cannot timeout this user."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_TIMEOUT, "timeout")
             return
 
         seconds = TimeConverter.parse(duration)
@@ -385,12 +444,17 @@ class Moderation(commands.Cog):
         reason: str = "No reason provided"
     ):
         """Kick a user"""
-        can_moderate, error = PermissionChecker.can_moderate(interaction.user, user)
-        if not can_moderate:
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_KICK,
+            base_check=lambda m: self._base_mod_check(m, user, ["kick_members"])
+        )
+        if not allowed:
             await interaction.response.send_message(
-                embed=EmbedFactory.error("Cannot Kick", error),
+                embed=EmbedFactory.error("No Permission", "You cannot kick this user."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_KICK, "kick")
             return
 
         try:
@@ -433,12 +497,17 @@ class Moderation(commands.Cog):
         delete_messages: int = 0
     ):
         """Ban a user"""
-        can_moderate, error = PermissionChecker.can_moderate(interaction.user, user)
-        if not can_moderate:
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_BAN,
+            base_check=lambda m: self._base_mod_check(m, user, ["ban_members"])
+        )
+        if not allowed:
             await interaction.response.send_message(
-                embed=EmbedFactory.error("Cannot Ban", error),
+                embed=EmbedFactory.error("No Permission", "You cannot ban this user."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_BAN, "ban")
             return
 
         if delete_messages < 0 or delete_messages > 7:
@@ -482,6 +551,18 @@ class Moderation(commands.Cog):
         user_id: str
     ):
         """Unban a user"""
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_BAN,
+            base_check=lambda m: self._base_mod_check(m, None, ["ban_members"])
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot unban users."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_BAN, "unban")
+            return
         try:
             user_id_int = int(user_id)
             user = await self.bot.fetch_user(user_id_int)
@@ -526,6 +607,18 @@ class Moderation(commands.Cog):
         user: Optional[discord.Member] = None
     ):
         """Clear messages from channel"""
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_CLEAR,
+            base_check=lambda m: self._base_mod_check(m, None, ["manage_messages"])
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot clear messages here."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_CLEAR, "clear")
+            return
         if amount < 1 or amount > 100:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Invalid Amount", "Amount must be between 1 and 100"),
@@ -572,6 +665,18 @@ class Moderation(commands.Cog):
     @is_moderator()
     async def slowmode(self, interaction: discord.Interaction, seconds: int):
         """Set slowmode for channel"""
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_SLOWMODE,
+            base_check=lambda m: self._base_mod_check(m, None, ["manage_channels"])
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot set slowmode here."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_SLOWMODE, "slowmode")
+            return
         if seconds < 0 or seconds > 21600:  # Max 6 hours
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Invalid Duration", "Slowmode must be between 0 and 21600 seconds (6 hours)"),
@@ -614,6 +719,18 @@ class Moderation(commands.Cog):
     @is_moderator()
     async def lock(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
         """Lock a channel"""
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_LOCK,
+            base_check=lambda m: self._base_mod_check(m, None, ["manage_channels"])
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot lock this channel."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_LOCK, "lock")
+            return
         target_channel = channel or interaction.channel
 
         try:
@@ -646,6 +763,18 @@ class Moderation(commands.Cog):
     @is_moderator()
     async def unlock(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
         """Unlock a channel"""
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_LOCK,
+            base_check=lambda m: self._base_mod_check(m, None, ["manage_channels"])
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot unlock this channel."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_LOCK, "unlock")
+            return
         target_channel = channel or interaction.channel
 
         try:
@@ -686,12 +815,17 @@ class Moderation(commands.Cog):
         nickname: Optional[str] = None
     ):
         """Change user nickname"""
-        can_moderate, error = PermissionChecker.can_moderate(interaction.user, user)
-        if not can_moderate:
+        allowed = await self.perms.check(
+            interaction.user,
+            FeatureKey.MOD_NICKNAME,
+            base_check=lambda m: self._base_mod_check(m, user, ["manage_nicknames"])
+        )
+        if not allowed:
             await interaction.response.send_message(
-                embed=EmbedFactory.error("Cannot Change Nickname", error),
+                embed=EmbedFactory.error("No Permission", "You cannot change that nickname."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.MOD_NICKNAME, "nickname")
             return
 
         try:

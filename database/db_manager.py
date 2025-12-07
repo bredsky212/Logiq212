@@ -82,6 +82,21 @@ class DatabaseManager:
         """Access staff applications config collection"""
         return self.db.staff_app_config if self.db is not None else None
 
+    @property
+    def feature_permissions(self):
+        """Access feature permissions collection"""
+        return self.db.feature_permissions if self.db is not None else None
+
+    @property
+    def feature_permissions_audit(self):
+        """Access feature permissions audit collection"""
+        return self.db.feature_permissions_audit if self.db is not None else None
+
+    @property
+    def suspensions(self):
+        """Access suspensions collection"""
+        return self.db.suspensions if self.db is not None else None
+
     async def _ensure_indexes(self) -> None:
         """Ensure required indexes are present"""
         if self.db is None:
@@ -97,6 +112,12 @@ class DatabaseManager:
             await self.db.staff_applications.create_index([("guild_id", 1), ("template_id", 1), ("status", 1)])
             await self.db.staff_applications.create_index([("applicant_id", 1), ("guild_id", 1)])
             await self.db.staff_app_config.create_index([("guild_id", 1)], unique=True)
+            await self.db.feature_permissions.create_index(
+                [("guild_id", 1), ("feature_key", 1)], unique=True
+            )
+            await self.db.feature_permissions_audit.create_index([("guild_id", 1), ("at", -1)])
+            await self.db.suspensions.create_index([("guild_id", 1), ("user_id", 1), ("active", 1)])
+            await self.db.suspensions.create_index([("guild_id", 1), ("ends_at", 1)])
         except Exception as e:
             logger.warning(f"Failed to ensure database indexes: {e}")
 
@@ -299,6 +320,69 @@ class DatabaseManager:
         query.update({k: v for k, v in filters.items() if v is not None})
         cursor = self.staff_applications.find(query).sort("created_at", -1)
         return await cursor.to_list(length=200)
+
+    # Feature permissions operations
+    async def get_feature_permission(self, guild_id: int, feature_key: str) -> Optional[Dict[str, Any]]:
+        """Get feature permission document"""
+        return await self.feature_permissions.find_one({
+            "guild_id": guild_id,
+            "feature_key": feature_key
+        })
+
+    async def upsert_feature_permission(self, guild_id: int, feature_key: str, update: Dict[str, Any]) -> Dict[str, Any]:
+        """Upsert feature permission document"""
+        await self.feature_permissions.update_one(
+            {"guild_id": guild_id, "feature_key": feature_key},
+            {"$set": {"guild_id": guild_id, "feature_key": feature_key, **update}},
+            upsert=True
+        )
+        return await self.get_feature_permission(guild_id, feature_key)
+
+    async def delete_feature_permission(self, guild_id: int, feature_key: str) -> bool:
+        """Delete feature permission document"""
+        result = await self.feature_permissions.delete_one({"guild_id": guild_id, "feature_key": feature_key})
+        return result.deleted_count > 0
+
+    async def list_feature_permissions(self, guild_id: int) -> List[Dict[str, Any]]:
+        """List feature permissions for guild"""
+        cursor = self.feature_permissions.find({"guild_id": guild_id})
+        return await cursor.to_list(length=200)
+
+    async def add_feature_permission_audit(self, audit_doc: Dict[str, Any]) -> str:
+        """Insert feature permission audit entry"""
+        result = await self.feature_permissions_audit.insert_one(audit_doc)
+        return str(result.inserted_id)
+
+    # Suspension operations
+    async def create_suspension(self, data: Dict[str, Any]) -> str:
+        """Create suspension record"""
+        result = await self.suspensions.insert_one(data)
+        return str(result.inserted_id)
+
+    async def close_active_suspensions(self, guild_id: int, user_id: int, resolved_by: int) -> None:
+        """Mark existing active suspensions as resolved"""
+        from datetime import datetime
+        await self.suspensions.update_many(
+            {"guild_id": guild_id, "user_id": user_id, "active": True},
+            {"$set": {"active": False, "resolved_at": datetime.utcnow(), "resolved_by": resolved_by}}
+        )
+
+    async def update_suspension(self, guild_id: int, user_id: int, update: Dict[str, Any]) -> bool:
+        """Update suspension for user"""
+        result = await self.suspensions.update_one(
+            {"guild_id": guild_id, "user_id": user_id, "active": True},
+            {"$set": update}
+        )
+        return result.modified_count > 0
+
+    async def get_active_suspension(self, guild_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get active suspension"""
+        return await self.suspensions.find_one({"guild_id": guild_id, "user_id": user_id, "active": True})
+
+    async def get_suspension_history(self, guild_id: int, user_id: int, limit: int = 3) -> List[Dict[str, Any]]:
+        """Get suspension history"""
+        cursor = self.suspensions.find({"guild_id": guild_id, "user_id": user_id}).sort("started_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
 
     # Tickets operations
     async def create_ticket(self, ticket_data: Dict[str, Any]) -> str:

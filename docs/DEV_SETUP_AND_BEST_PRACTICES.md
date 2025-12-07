@@ -37,5 +37,12 @@ This repo has a few gotchas when working on Windows/PowerShell with UTF‑8 cont
 - **LF/CRLF warnings**: set Git `core.autocrlf=input` or ensure your editor saves with LF.
 - **UTF-8 parsing errors**: rerun with `py -3 -Xutf8 ...` or `Get-Content -Encoding UTF8`.
 
+## Discord Bot Pitfalls We Hit (Do These Next Time)
+- **Bind slash-command groups from the cog instance**: in each `setup`, create the cog (`cog = MyCog(bot, ...)`), add it, then `bot.tree.add_command(cog.group)`. Adding the class attribute (`MyCog.group`) caused `CommandSignatureMismatch` and “application didn’t respond”.
+- **Sync globally**: keep `/sync` as a global `tree.sync()` to refresh definitions; avoid guild-specific sync unless explicitly requested.
+- **Defer before DB/IO**: call `await interaction.response.defer(ephemeral=True, thinking=True)` before long DB calls; send results via followups to avoid the 3s timeout.
+- **Use discord.py’s timeout API**: on 2.x call `member.timeout(timedelta, reason=...)` and `member.timeout(None, reason=...)`; do not pass the raw field `communication_disabled_until`.
+- **Propagate logging handlers**: ensure handlers are attached to the root logger so `logiq.*` and cog loggers show up under systemd.
+- **Verify the runtime env**: confirm systemd `ExecStart` points to the venv’s Python and reinstall deps (`pip install -r requirements.txt`) if you see missing kwargs or version mismatches.
 
 Keep this handy when setting up a fresh environment; it captures the main pitfalls we encountered (encoding, PowerShell chaining, dataset management, OCC usage).

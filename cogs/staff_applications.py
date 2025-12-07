@@ -20,6 +20,9 @@ from database.models import (
     StaffApplication,
 )
 from utils.embeds import EmbedFactory, EmbedColor
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +220,9 @@ class StaffApplications(commands.Cog):
         self.db = db
         self.config = config
         self._register_task = bot.loop.create_task(self._register_persistent_views())
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
+        self._log = bot.logger if hasattr(bot, "logger") else logger
 
     async def _register_persistent_views(self):
         """Register persistent views for existing templates and open applications"""
@@ -270,6 +276,49 @@ class StaffApplications(commands.Cog):
             role.id in config.get("reviewer_roles", []) for role in member.roles
         )
 
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send staffapp log to {channel} in {guild.id}")
+
+    async def _check_template_manage(self, member: discord.Member, config: Dict[str, Any]) -> bool:
+        return await self.perms.check(
+            member,
+            FeatureKey.STAFFAPP_TEMPLATE_MANAGE,
+            base_check=lambda m: self._is_creator(m, config),
+        )
+
+    async def _check_review(self, member: discord.Member, config: Dict[str, Any]) -> bool:
+        return await self.perms.check(
+            member,
+            FeatureKey.STAFFAPP_REVIEW,
+            base_check=lambda m: self._is_reviewer(m, config),
+        )
+
+    async def _maybe_log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "staffapp", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
     # Config commands
     @config_group.command(name="set-creator-role", description="Set creator role for staff applications")
     async def set_creator_role(self, interaction: discord.Interaction, role: discord.Role):
@@ -314,7 +363,7 @@ class StaffApplications(commands.Cog):
     @config_group.command(name="add-reviewer-role", description="Add reviewer role for staff applications")
     async def add_reviewer_role(self, interaction: discord.Interaction, role: discord.Role):
         config = await self._get_config(interaction.guild.id)
-        if not self._is_creator(interaction.user, config):
+        if not await self._check_template_manage(interaction.user, config):
             await interaction.response.send_message(
                 embed=EmbedFactory.error("No Permission", "Only admins or creators can add reviewer roles."),
                 ephemeral=True
@@ -334,7 +383,7 @@ class StaffApplications(commands.Cog):
     @config_group.command(name="remove-reviewer-role", description="Remove reviewer role for staff applications")
     async def remove_reviewer_role(self, interaction: discord.Interaction, role: discord.Role):
         config = await self._get_config(interaction.guild.id)
-        if not self._is_creator(interaction.user, config):
+        if not await self._check_template_manage(interaction.user, config):
             await interaction.response.send_message(
                 embed=EmbedFactory.error("No Permission", "Only admins or creators can remove reviewer roles."),
                 ephemeral=True
@@ -390,11 +439,12 @@ class StaffApplications(commands.Cog):
         description: Optional[str] = None
     ):
         config = await self._get_config(interaction.guild.id)
-        if not self._is_creator(interaction.user, config):
+        if not await self._check_template_manage(interaction.user, config):
             await interaction.response.send_message(
                 embed=EmbedFactory.error("No Permission", "You cannot create staff application templates."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.STAFFAPP_TEMPLATE_MANAGE, "template-create")
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -461,11 +511,12 @@ class StaffApplications(commands.Cog):
     @template_group.command(name="list", description="List staff application templates")
     async def template_list(self, interaction: discord.Interaction):
         config = await self._get_config(interaction.guild.id)
-        if not self._is_creator(interaction.user, config):
+        if not await self._check_template_manage(interaction.user, config):
             await interaction.response.send_message(
                 embed=EmbedFactory.error("No Permission", "You cannot view templates."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.STAFFAPP_TEMPLATE_MANAGE, "template-list")
             return
 
         templates = await self.db.list_staff_templates(interaction.guild.id)
@@ -503,11 +554,12 @@ class StaffApplications(commands.Cog):
 
     async def _set_template_active(self, interaction: discord.Interaction, template_id: str, is_active: bool):
         config = await self._get_config(interaction.guild.id)
-        if not self._is_creator(interaction.user, config):
+        if not await self._check_template_manage(interaction.user, config):
             await interaction.response.send_message(
                 embed=EmbedFactory.error("No Permission", "You cannot modify templates."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.STAFFAPP_TEMPLATE_MANAGE, "template-toggle")
             return
 
         updated = await self.db.set_staff_template_active(interaction.guild.id, template_id, is_active)
@@ -545,11 +597,12 @@ class StaffApplications(commands.Cog):
         status: Optional[app_commands.Choice[str]] = None
     ):
         config = await self._get_config(interaction.guild.id)
-        if not self._is_reviewer(interaction.user, config):
+        if not await self._check_review(interaction.user, config):
             await interaction.response.send_message(
                 embed=EmbedFactory.error("No Permission", "You cannot view the application queue."),
                 ephemeral=True
             )
+            await self._maybe_log_denial(interaction, FeatureKey.STAFFAPP_REVIEW, "queue")
             return
 
         filters: Dict[str, Any] = {}
@@ -606,6 +659,15 @@ class StaffApplications(commands.Cog):
         status: app_commands.Choice[str],
         notes: Optional[str] = None
     ):
+        config = await self._get_config(interaction.guild.id)
+        if not await self._check_review(interaction.user, config):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot update application status."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.STAFFAPP_REVIEW, "set-status")
+            return
+
         await self._handle_status_update(
             interaction=interaction,
             application_id=application_id,
@@ -615,6 +677,16 @@ class StaffApplications(commands.Cog):
         )
 
     async def _handle_status_button(self, interaction: discord.Interaction, new_status: str, application_id: str):
+        config = await self._get_config(interaction.guild.id)
+        if not await self._check_review(interaction.user, config):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    embed=EmbedFactory.error("No Permission", "You cannot review staff applications."),
+                    ephemeral=True
+                )
+            await self._maybe_log_denial(interaction, FeatureKey.STAFFAPP_REVIEW, "review-button")
+            return
+
         await self._handle_status_update(
             interaction=interaction,
             application_id=application_id,

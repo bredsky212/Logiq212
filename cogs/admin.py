@@ -62,13 +62,10 @@ class Admin(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            if interaction.guild:
-                synced = await self.bot.tree.sync(guild=interaction.guild)
-            else:
-                synced = await self.bot.tree.sync()
+            synced = await self.bot.tree.sync()
             embed = EmbedFactory.success(
                 "Commands Synced",
-                f"Successfully synced **{len(synced)}** commands"
+                f"Successfully synced **{len(synced)}** commands globally.",
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"{interaction.user} synced commands")

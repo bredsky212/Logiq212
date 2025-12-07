@@ -6,6 +6,7 @@ Defines structure for database documents
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 
 
 @dataclass
@@ -373,3 +374,113 @@ class StaffApplication:
             review_channel_id=data.get("review_channel_id", 0),
             review_message_id=data.get("review_message_id", 0),
         )
+
+
+class FeatureKey(str, Enum):
+    """Feature keys used for permission gating"""
+    # Moderation
+    MOD_VC_SUSPEND = "mod.vc_suspend"
+    MOD_VC_UNSUSPEND = "mod.vc_unsuspend"
+    MOD_WARN = "mod.warn"
+    MOD_WARNINGS = "mod.warnings"
+    MOD_TIMEOUT = "mod.timeout"
+    MOD_BAN = "mod.ban"
+    MOD_KICK = "mod.kick"
+    MOD_CLEAR = "mod.clear"
+    MOD_SLOWMODE = "mod.slowmode"
+    MOD_LOCK = "mod.lock"
+    MOD_NICKNAME = "mod.nickname"
+    REPORT_CREATE = "report.create"
+
+    # Tickets
+    TICKETS_CREATE = "tickets.create"
+    TICKETS_CLOSE = "tickets.close"
+    TICKETS_ADMIN = "tickets.admin"
+
+    # Staff applications
+    STAFFAPP_TEMPLATE_MANAGE = "staffapp.template.manage"
+    STAFFAPP_REVIEW = "staffapp.review"
+
+    # Reports
+    REPORT_VIEW = "report.view"
+    REPORT_MANAGE = "report.manage"
+
+    # Permissions management
+    PERMS_MANAGE = "perms.manage"
+
+
+@dataclass
+class FeaturePermission:
+    """Per-feature role allow/deny configuration"""
+    guild_id: int
+    feature_key: str
+    allowed_roles: List[int] = field(default_factory=list)
+    denied_roles: List[int] = field(default_factory=list)
+    updated_by: Optional[int] = None
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "guild_id": self.guild_id,
+            "feature_key": self.feature_key,
+            "allowed_roles": self.allowed_roles,
+            "denied_roles": self.denied_roles,
+            "updated_by": self.updated_by,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class FeaturePermissionAudit:
+    """Audit log entry for feature permission changes"""
+    guild_id: int
+    feature_key: str
+    changed_by: int
+    change_type: str  # allow | deny | clear | reset
+    role_id: Optional[int]
+    old_doc: Dict[str, Any]
+    new_doc: Dict[str, Any]
+    at: datetime = field(default_factory=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "guild_id": self.guild_id,
+            "feature_key": self.feature_key,
+            "changed_by": self.changed_by,
+            "change_type": self.change_type,
+            "role_id": self.role_id,
+            "old_doc": self.old_doc,
+            "new_doc": self.new_doc,
+            "at": self.at,
+        }
+
+
+@dataclass
+class Suspension:
+    """Voice/chat suspension record (timeout)"""
+    guild_id: int
+    user_id: int
+    moderator_id: int
+    reason: str
+    duration_seconds: int
+    started_at: datetime
+    ends_at: datetime
+    type: str = "timeout"
+    active: bool = True
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "guild_id": self.guild_id,
+            "user_id": self.user_id,
+            "moderator_id": self.moderator_id,
+            "reason": self.reason,
+            "duration_seconds": self.duration_seconds,
+            "started_at": self.started_at,
+            "ends_at": self.ends_at,
+            "type": self.type,
+            "active": self.active,
+            "resolved_at": self.resolved_at,
+            "resolved_by": self.resolved_by,
+        }
