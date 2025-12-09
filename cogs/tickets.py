@@ -15,6 +15,7 @@ from database.db_manager import DatabaseManager
 from database.models import FeatureKey
 from utils.feature_permissions import FeaturePermissionManager
 from utils.denials import DenialLogger
+from utils.logs import resolve_log_channel
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +58,9 @@ class Tickets(commands.Cog):
         self.denials = DenialLogger()
 
     async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
-        guild_config = await self.db.get_guild(guild.id)
-        if not guild_config:
+        channel = await resolve_log_channel(self.db, guild, "tickets")
+        if not channel:
             return
-        log_channel_id = guild_config.get('ticket_log_channel') or guild_config.get('log_channel')
-        if not log_channel_id:
-            return
-        channel = guild.get_channel(log_channel_id)
-        if channel is None:
-            try:
-                channel = await guild.fetch_channel(log_channel_id)
-            except discord.HTTPException:
-                return
         try:
             await channel.send(embed=embed)
         except discord.Forbidden:
@@ -186,19 +178,17 @@ class Tickets(commands.Cog):
             await channel.send(embed=embed, view=close_view)
             
             # Log ticket creation to ticket log channel
-            ticket_log_channel_id = guild_config.get('ticket_log_channel')
-            if ticket_log_channel_id:
-                log_channel = interaction.guild.get_channel(ticket_log_channel_id)
-                if log_channel:
-                    log_embed = EmbedFactory.create(
-                        title="🎫 New Ticket Created",
-                        description=f"**Ticket:** {channel.mention}\n"
-                                   f"**Created by:** {interaction.user.mention}\n"
-                                   f"**Ticket ID:** {ticket_id}\n"
-                                   f"**Status:** Open",
-                        color=EmbedColor.SUCCESS
-                    )
-                    await log_channel.send(embed=log_embed)
+            log_channel = await resolve_log_channel(self.db, interaction.guild, "tickets")
+            if log_channel:
+                log_embed = EmbedFactory.create(
+                    title="🎫 New Ticket Created",
+                    description=f"**Ticket:** {channel.mention}\n"
+                               f"**Created by:** {interaction.user.mention}\n"
+                               f"**Ticket ID:** {ticket_id}\n"
+                               f"**Status:** Open",
+                    color=EmbedColor.SUCCESS
+                )
+                await log_channel.send(embed=log_embed)
 
             await interaction.response.send_message(
                 embed=EmbedFactory.success(
@@ -252,22 +242,17 @@ class Tickets(commands.Cog):
         ticket_channel_id = interaction.channel.id
         
         # Log ticket closure to ticket log channel
-        ticket_log_channel_id = guild_config.get('ticket_log_channel') if guild_config else None
-        if ticket_log_channel_id:
-            log_channel = interaction.guild.get_channel(ticket_log_channel_id)
-            if log_channel:
-                # Get ticket creator from channel name
-                ticket_creator_name = interaction.channel.name.replace("ticket-", "")
-                
-                log_embed = EmbedFactory.create(
-                    title="🔒 Ticket Closed",
-                    description=f"**Ticket:** {interaction.channel.name}\n"
-                               f"**Closed by:** {interaction.user.mention}\n"
-                               f"**Reason:** {reason}\n"
-                               f"**Status:** Closed",
-                    color=EmbedColor.WARNING
-                )
-                await log_channel.send(embed=log_embed)
+        log_channel = await resolve_log_channel(self.db, interaction.guild, "tickets")
+        if log_channel:
+            log_embed = EmbedFactory.create(
+                title="🔒 Ticket Closed",
+                description=f"**Ticket:** {interaction.channel.name}\n"
+                           f"**Closed by:** {interaction.user.mention}\n"
+                           f"**Reason:** {reason}\n"
+                           f"**Status:** Closed",
+                color=EmbedColor.WARNING
+            )
+            await log_channel.send(embed=log_embed)
 
         embed = EmbedFactory.warning(
             "🔒 Ticket Closing",
