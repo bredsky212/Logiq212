@@ -265,8 +265,9 @@ class Utility(commands.Cog):
         logger.info(f"{interaction.user} set reminder in {interaction.guild}")
 
     @app_commands.command(name="serverstats", description="View server statistics (Admin)")
+    @app_commands.describe(public="If true, post publicly (admins only; default is private)")
     @is_admin()
-    async def serverstats(self, interaction: discord.Interaction):
+    async def serverstats(self, interaction: discord.Interaction, public: bool = False):
         """View server stats"""
         guild = interaction.guild
 
@@ -295,7 +296,7 @@ class Utility(commands.Cog):
             ]
         )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="userinfo", description="Get information about a user (Admin)")
     @app_commands.describe(user="User to get info about")

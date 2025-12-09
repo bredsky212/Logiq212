@@ -98,7 +98,9 @@ class Admin(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="botinfo", description="View bot information")
-    async def botinfo(self, interaction: discord.Interaction):
+    @app_commands.describe(public="If true, post publicly (admins only; default is private)")
+    @is_admin()
+    async def botinfo(self, interaction: discord.Interaction, public: bool = False):
         """Display bot information"""
         # Calculate uptime
         uptime = discord.utils.utcnow() - self.bot.start_time if hasattr(self.bot, 'start_time') else None
@@ -125,7 +127,7 @@ class Admin(commands.Cog):
             ]
         )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="setlogchannel", description="Set the log channel")
     @app_commands.describe(channel="Channel for moderation logs")
