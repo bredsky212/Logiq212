@@ -16,6 +16,7 @@ from database.models import FeatureKey, Suspension
 from utils.embeds import EmbedFactory, EmbedColor
 from utils.feature_permissions import FeaturePermissionManager, SENSITIVE_FEATURES
 from utils.security import is_protected_member
+from utils.logs import resolve_log_channel
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +56,9 @@ class VCMod(commands.Cog):
         return True
 
     async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
-        guild_config = await self.db.get_guild(guild.id)
-        if not guild_config:
+        channel = await resolve_log_channel(self.db, guild, "vcmod")
+        if not channel:
             return
-        log_channel_id = guild_config.get("log_channel")
-        if not log_channel_id:
-            return
-        channel = guild.get_channel(log_channel_id)
-        if channel is None:
-            try:
-                channel = await guild.fetch_channel(log_channel_id)
-            except discord.HTTPException:
-                return
         try:
             await channel.send(embed=embed)
         except discord.Forbidden:

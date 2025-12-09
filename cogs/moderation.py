@@ -18,6 +18,7 @@ from database.db_manager import DatabaseManager
 from database.models import Warning, Report, FeatureKey
 from utils.feature_permissions import FeaturePermissionManager, SENSITIVE_FEATURES
 from utils.denials import DenialLogger
+from utils.logs import resolve_log_channel
 from utils.security import is_protected_member
 
 logger = logging.getLogger(__name__)
@@ -953,7 +954,7 @@ class Moderation(commands.Cog):
 
     async def _send_report_log(self, guild: discord.Guild, embed: discord.Embed) -> bool:
         """Send report embed to the configured log channel"""
-        log_channel = await self._get_log_channel(guild)
+        log_channel = await resolve_log_channel(self.db, guild, "reports") or await self._get_log_channel(guild)
         if not log_channel:
             return False
 
@@ -1019,15 +1020,7 @@ class Moderation(commands.Cog):
 
     async def _log_action(self, guild: discord.Guild, embed: discord.Embed):
         """Log moderation action to log channel"""
-        guild_config = await self.db.get_guild(guild.id)
-        if not guild_config:
-            return
-
-        log_channel_id = guild_config.get('log_channel')
-        if not log_channel_id:
-            return
-
-        log_channel = guild.get_channel(log_channel_id)
+        log_channel = await resolve_log_channel(self.db, guild, "moderation")
         if log_channel:
             try:
                 await log_channel.send(embed=embed)

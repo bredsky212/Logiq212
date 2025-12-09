@@ -16,6 +16,7 @@ from database.db_manager import DatabaseManager
 from database.models import FeatureKey
 from utils.feature_permissions import FeaturePermissionManager
 from utils.security import filter_protected_roles
+from utils.logs import resolve_log_channel
 from utils.denials import DenialLogger
 
 logger = logging.getLogger(__name__)
@@ -285,16 +286,14 @@ class Verification(commands.Cog):
 
         except discord.Forbidden:
             logger.warning(f"Could not DM {member} in {member.guild} - DMs disabled")
-            log_channel_id = guild_config.get('log_channel')
-            if log_channel_id:
-                log_channel = member.guild.get_channel(log_channel_id)
-                if log_channel:
-                    await log_channel.send(
-                        embed=EmbedFactory.error(
-                            "Verification DM Failed",
-                            f"Could not send verification DM to {member.mention} (DMs disabled)"
-                        )
+            log_channel = await resolve_log_channel(self.db, member.guild, "moderation")
+            if log_channel:
+                await log_channel.send(
+                    embed=EmbedFactory.error(
+                        "Verification DM Failed",
+                        f"Could not send verification DM to {member.mention} (DMs disabled)"
                     )
+                )
 
     async def verify_user(self, interaction: discord.Interaction):
         """Verify a user and assign role (SILENT - no public announcements)"""

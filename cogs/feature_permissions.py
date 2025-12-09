@@ -14,6 +14,7 @@ from database.models import FeatureKey
 from utils.embeds import EmbedFactory, EmbedColor
 from utils.feature_permissions import FeaturePermissionManager, SENSITIVE_FEATURES
 from utils.security import get_or_bootstrap_security, security_cache
+from utils.logs import resolve_log_channel
 from utils.denials import DenialLogger
 
 logger = logging.getLogger(__name__)
@@ -46,18 +47,9 @@ class FeaturePermissions(commands.Cog):
             self.manager.denials = self.denials
 
     async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
-        guild_config = await self.db.get_guild(guild.id)
-        if not guild_config:
-            return
-        log_channel_id = guild_config.get("log_channel")
-        if not log_channel_id:
-            return
-        channel = guild.get_channel(log_channel_id)
+        channel = await resolve_log_channel(self.db, guild, "feature_permissions")
         if not channel:
-            try:
-                channel = await guild.fetch_channel(log_channel_id)
-            except discord.HTTPException:
-                return
+            return
         try:
             await channel.send(embed=embed)
         except discord.Forbidden:
