@@ -199,6 +199,9 @@ def _hierarchy_block(self, moderator: discord.Member, target: discord.Member) ->
   * Documented in the permissions README section.
   * Checked in its owning cog.
 
+- Sensitive features remain locked until `/perms security-bootstrap` runs. Protected roles (admin/manage_guild and any explicitly added) and the guild owner must never be targeted, assigned, or removed by the bot.
+- Resolve log channels via `utils.logs.resolve_log_channel(db, guild, purpose)` instead of hardcoding `log_channel`; `/setlogchannel-advanced` sets per-purpose channels (`reports`, `moderation`, `vcmod`, `tickets`, `feature_permissions`, `default`).
+
 ---
 
 ## 5. Database Access & Schemas

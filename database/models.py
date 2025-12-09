@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from datetime import datetime
 
 
 @dataclass
@@ -408,6 +409,45 @@ class FeatureKey(str, Enum):
     # Permissions management
     PERMS_MANAGE = "perms.manage"
 
+    # Verification
+    VERIFY_CONFIG = "verify.config"
+
+    # Games
+    GAMES_PANEL_MANAGE = "games.panel.manage"
+
+    # Roles
+    ROLES_MENU_MANAGE = "roles.menu.manage"
+    ROLES_FORCE_ASSIGN = "roles.force.assign"
+
+    # Economy
+    ECONOMY_ADMIN_ADJUST = "economy.admin.adjust"
+
+    # Leveling
+    LEVELING_ADMIN_SET = "leveling.admin.set"
+    LEVELING_ADMIN_RESET = "leveling.admin.reset"
+
+    # Giveaways
+    GIVEAWAY_CREATE = "giveaway.create"
+    GIVEAWAY_MANAGE = "giveaway.manage"
+
+    # Music
+    MUSIC_DJ_BASIC = "music.dj.basic"
+    MUSIC_DJ_VOLUME = "music.dj.volume"
+
+    # Social alerts
+    ALERTS_MANAGE = "alerts.manage"
+    ALERTS_VIEW = "alerts.view"
+
+    # Temporary voice
+    TEMPVOICE_SETUP = "tempvoice.setup"
+    TEMPVOICE_OWNER_POWER = "tempvoice.owner.power"
+
+    # Utility
+    UTILITY_POLL = "utility.poll"
+
+    # Analytics
+    ANALYTICS_VIEW = "analytics.view"
+
 
 @dataclass
 class FeaturePermission:
@@ -452,6 +492,25 @@ class FeaturePermissionAudit:
             "old_doc": self.old_doc,
             "new_doc": self.new_doc,
             "at": self.at,
+        }
+
+
+@dataclass
+class GuildSecurityConfig:
+    """Security configuration for a guild."""
+    guild_id: int
+    protected_role_ids: List[int] = field(default_factory=list)
+    initialized: bool = False
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "guild_id": self.guild_id,
+            "protected_role_ids": self.protected_role_ids,
+            "initialized": self.initialized,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
 

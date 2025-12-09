@@ -14,7 +14,10 @@ import asyncio
 from utils.embeds import EmbedFactory, EmbedColor
 from utils.converters import TimeConverter
 from utils.permissions import is_admin
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +94,45 @@ class Utility(commands.Cog):
         self.bot = bot
         self.db = db
         self.config = config
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
         self.reminders_task = self.bot.loop.create_task(self.check_reminders())
+
+    def _base_poll_check(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return (perms.send_messages and perms.embed_links) or perms.manage_guild or perms.administrator or member == member.guild.owner
+
+    async def _can_poll(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.UTILITY_POLL, self._base_poll_check)
+
+    async def _log_denial(self, interaction: discord.Interaction, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "utility", FeatureKey.UTILITY_POLL.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{FeatureKey.UTILITY_POLL.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send utility log to channel {channel} in {guild}")
 
     def cog_unload(self):
         """Cleanup on cog unload"""
@@ -134,7 +175,6 @@ class Utility(commands.Cog):
         option4="Option 4 (optional)",
         duration="Duration in minutes (default: 60)"
     )
-    @is_admin()
     async def poll(
         self,
         interaction: discord.Interaction,
@@ -146,6 +186,14 @@ class Utility(commands.Cog):
         duration: int = 60
     ):
         """Create a poll"""
+        if not await self._can_poll(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to create polls."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, "poll")
+            return
+
         options = [option1, option2]
         if option3:
             options.append(option3)
@@ -217,8 +265,9 @@ class Utility(commands.Cog):
         logger.info(f"{interaction.user} set reminder in {interaction.guild}")
 
     @app_commands.command(name="serverstats", description="View server statistics (Admin)")
+    @app_commands.describe(public="If true, post publicly (admins only; default is private)")
     @is_admin()
-    async def serverstats(self, interaction: discord.Interaction):
+    async def serverstats(self, interaction: discord.Interaction, public: bool = False):
         """View server stats"""
         guild = interaction.guild
 
@@ -247,7 +296,7 @@ class Utility(commands.Cog):
             ]
         )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="userinfo", description="Get information about a user (Admin)")
     @app_commands.describe(user="User to get info about")

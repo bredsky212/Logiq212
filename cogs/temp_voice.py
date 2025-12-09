@@ -10,8 +10,10 @@ from typing import Optional
 import logging
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,51 @@ class TempVoice(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('temp_voice', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
         self.temp_channels = set()  # Track temporary channels
+
+    def _base_setup_check(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_channels or perms.manage_guild or perms.administrator or member == member.guild.owner
+
+    def _base_owner_power(self, member: discord.Member) -> bool:
+        return bool(member.voice and member.voice.channel and member.voice.channel.id in self.temp_channels)
+
+    async def _can_setup(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.TEMPVOICE_SETUP, self._base_setup_check)
+
+    async def _can_owner_power(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.TEMPVOICE_OWNER_POWER, self._base_owner_power)
+
+    async def _log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "tempvoice", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send temp voice log to channel {channel} in {guild}")
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -103,7 +149,6 @@ class TempVoice(commands.Cog):
         category="Category for temporary channels",
         creator_name="Name for the creator channel (default: '➕ Create Channel')"
     )
-    @is_admin()
     async def setup_tempvoice(
         self,
         interaction: discord.Interaction,
@@ -111,6 +156,15 @@ class TempVoice(commands.Cog):
         creator_name: str = "➕ Create Channel"
     ):
         """Setup temporary voice channels (ADMIN ONLY)"""
+        if not await self._can_setup(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to configure temporary voice."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.TEMPVOICE_SETUP, "setup-tempvoice")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             # Create the creator channel
             creator_channel = await category.create_voice_channel(
@@ -134,17 +188,17 @@ class TempVoice(commands.Cog):
                 f"**Creator Channel:** {creator_channel.mention}\n\n"
                 "Users can join the creator channel to automatically create their own temporary voice channel!"
             )
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"Temp voice setup in {interaction.guild}")
 
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Permission Error", "I don't have permission to create channels"),
                 ephemeral=True
             )
         except Exception as e:
             logger.error(f"Error setting up temp voice: {e}", exc_info=True)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Error", f"Failed to setup temporary voice: {str(e)}"),
                 ephemeral=True
             )
@@ -166,6 +220,14 @@ class TempVoice(commands.Cog):
                 embed=EmbedFactory.error("Not a Temp Channel", "This is not a temporary voice channel"),
                 ephemeral=True
             )
+            return
+
+        if not await self._can_owner_power(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You cannot manage this temporary channel."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.TEMPVOICE_OWNER_POWER, "voice-lock")
             return
 
         try:
@@ -200,6 +262,14 @@ class TempVoice(commands.Cog):
             )
             return
 
+        if not await self._can_owner_power(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You cannot manage this temporary channel."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.TEMPVOICE_OWNER_POWER, "voice-unlock")
+            return
+
         try:
             await channel.set_permissions(
                 interaction.guild.default_role,
@@ -231,6 +301,14 @@ class TempVoice(commands.Cog):
                 embed=EmbedFactory.error("Not a Temp Channel", "This is not a temporary voice channel"),
                 ephemeral=True
             )
+            return
+
+        if not await self._can_owner_power(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You cannot manage this temporary channel."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.TEMPVOICE_OWNER_POWER, "voice-limit")
             return
 
         if limit < 0 or limit > 99:
@@ -271,6 +349,14 @@ class TempVoice(commands.Cog):
             )
             return
 
+        if not await self._can_owner_power(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You cannot manage this temporary channel."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.TEMPVOICE_OWNER_POWER, "voice-rename")
+            return
+
         if len(name) > 100:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Name Too Long", "Channel name must be 100 characters or less"),
@@ -306,6 +392,14 @@ class TempVoice(commands.Cog):
                 embed=EmbedFactory.error("Not a Temp Channel", "This is not a temporary voice channel"),
                 ephemeral=True
             )
+            return
+
+        if not await self._can_owner_power(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You cannot manage this temporary channel."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.TEMPVOICE_OWNER_POWER, "voice-claim")
             return
 
         try:

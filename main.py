@@ -154,20 +154,25 @@ class Logiq(commands.Bot):
             await ctx.send(f"✅ Globally synced {len(synced)} commands.")
 
     async def load_cogs(self):
-        """Load all cogs from cogs directory"""
+        """Load all cogs from cogs directory, honoring config.modules enables."""
         cogs_dir = Path(__file__).parent / 'cogs'
         cog_files = [f.stem for f in cogs_dir.glob('*.py') if f.stem != '__init__']
 
         self.logger.info(f"Loading {len(cog_files)} cogs...")
 
+        loaded = 0
         for cog in cog_files:
+            if not is_cog_enabled(self.config, cog):
+                self.logger.info(f"Skipping cog {cog} (disabled in config.modules)")
+                continue
             try:
                 await self.load_extension(f'cogs.{cog}')
                 self.logger.cog_load(cog)
+                loaded += 1
             except Exception as e:
                 self.logger.error(f"Failed to load cog {cog}: {e}", exc_info=True)
 
-        self.logger.info(f"Successfully loaded {len(self.cogs)} cogs")
+        self.logger.info(f"Successfully loaded {loaded} cogs")
 
     async def on_ready(self):
         """Called when bot is ready"""
@@ -276,6 +281,22 @@ def load_config(config_path: str = 'config.yaml') -> dict:
     except yaml.YAMLError as e:
         print(f"Error parsing config file: {e}")
         sys.exit(1)
+
+
+def is_cog_enabled(config: dict, cog_name: str) -> bool:
+    """
+    Determine whether a cog should be loaded based on config.modules.<cog>.enabled.
+    Defaults to True when modules block or cog entry is missing.
+    """
+    modules_cfg = config.get("modules") or {}
+    cog_cfg = modules_cfg.get(cog_name)
+    if cog_cfg is None:
+        return True
+    if isinstance(cog_cfg, dict):
+        return cog_cfg.get("enabled", True)
+    if isinstance(cog_cfg, bool):
+        return cog_cfg
+    return True
 
 
 async def start_web_server(bot: Logiq):

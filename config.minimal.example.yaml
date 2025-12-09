@@ -1,0 +1,65 @@
+# Minimal config example: enable core moderation/tickets/perms/vcmod/staffapp only
+
+bot:
+  token: "${DISCORD_BOT_TOKEN}"
+  prefix: "/"
+  status: "online"
+  activity: "Managing your community"
+  activity_type: "watching"
+
+database:
+  mongodb_uri: "${MONGODB_URI}"
+  database_name: "Logiq"
+  pool_size: 10
+
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
+  format: "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+
+# Only these cogs enabled; others explicitly disabled.
+modules:
+  tickets:
+    enabled: true
+  moderation:
+    enabled: true
+  report:
+    enabled: true
+  vcmod:
+    enabled: true
+  feature_permissions:
+    enabled: true
+  staff_applications:
+    enabled: true
+
+  # Disabled modules
+  verification:
+    enabled: false
+  roles:
+    enabled: false
+  leveling:
+    enabled: false
+  economy:
+    enabled: false
+  ai_chat:
+    enabled: false
+  analytics:
+    enabled: false
+  games:
+    enabled: false
+  utility:
+    enabled: false
+  social_alerts:
+    enabled: false
+  giveaways:
+    enabled: false
+  temp_voice:
+    enabled: false
+  music:
+    enabled: false
+  admin:
+    enabled: true  # keep admin utilities available
+
+web:
+  enabled: false

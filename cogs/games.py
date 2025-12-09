@@ -11,8 +11,10 @@ import logging
 import random
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +187,8 @@ class Games(commands.Cog):
         self.config = config
         self.module_config = config.get('modules', {}).get('games', {})
         self.trivia_questions = self._load_trivia()
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
 
     def _load_trivia(self):
         """Load trivia questions"""
@@ -266,10 +270,54 @@ class Games(commands.Cog):
             }
         ]
 
+    def _base_games_check(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_guild or perms.manage_channels or perms.administrator or member == member.guild.owner
+
+    async def _check_games_admin(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.GAMES_PANEL_MANAGE, self._base_games_check)
+
+    async def _maybe_log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "games", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send games log to channel {channel} in {guild}")
+
     @app_commands.command(name="setup-game-panel", description="Setup game panel with buttons for users (Admin)")
-    @is_admin()
     async def setup_game_panel(self, interaction: discord.Interaction):
         """Setup game panel"""
+        if not await self._check_games_admin(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to configure the game panel."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.GAMES_PANEL_MANAGE, "setup-game-panel")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
         embed = EmbedFactory.create(
             title="🎮 Game Center",
             description="Click the buttons below to play games!\n\n"
@@ -299,7 +347,7 @@ class Games(commands.Cog):
         ball_embed = EmbedFactory.create(title="🔮 Magic 8-Ball", description="Ask the magic 8-ball a question!", color=EmbedColor.INFO)
         await interaction.channel.send(embed=ball_embed, view=EightBallView(self))
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=EmbedFactory.success("Game Panel Created", "Users can now play games by clicking buttons!"),
             ephemeral=True
         )

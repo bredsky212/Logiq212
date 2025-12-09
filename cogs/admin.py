@@ -13,6 +13,7 @@ import sys
 from utils.embeds import EmbedFactory, EmbedColor
 from utils.permissions import is_admin
 from database.db_manager import DatabaseManager
+from utils.logs import set_log_channel, resolve_log_channel
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,9 @@ class Admin(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="botinfo", description="View bot information")
-    async def botinfo(self, interaction: discord.Interaction):
+    @app_commands.describe(public="If true, post publicly (admins only; default is private)")
+    @is_admin()
+    async def botinfo(self, interaction: discord.Interaction, public: bool = False):
         """Display bot information"""
         # Calculate uptime
         uptime = discord.utils.utcnow() - self.bot.start_time if hasattr(self.bot, 'start_time') else None
@@ -124,7 +127,7 @@ class Admin(commands.Cog):
             ]
         )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="setlogchannel", description="Set the log channel")
     @app_commands.describe(channel="Channel for moderation logs")
@@ -135,7 +138,10 @@ class Admin(commands.Cog):
         if not guild_config:
             guild_config = await self.db.create_guild(interaction.guild.id)
 
-        await self.db.update_guild(interaction.guild.id, {'log_channel': channel.id})
+        await self.db.update_guild(
+            interaction.guild.id,
+            {'log_channel': channel.id, 'log_channels.default': channel.id}
+        )
 
         embed = EmbedFactory.success(
             "Log Channel Set",
@@ -143,6 +149,39 @@ class Admin(commands.Cog):
         )
         await interaction.response.send_message(embed=embed)
         logger.info(f"Log channel set to {channel} in {interaction.guild}")
+
+    @app_commands.command(name="setlogchannel-advanced", description="Set log channels per category")
+    @app_commands.describe(
+        kind="Log type to configure",
+        channel="Channel for these logs"
+    )
+    @app_commands.choices(
+        kind=[
+            app_commands.Choice(name="default", value="default"),
+            app_commands.Choice(name="reports", value="reports"),
+            app_commands.Choice(name="moderation", value="moderation"),
+            app_commands.Choice(name="vcmod", value="vcmod"),
+            app_commands.Choice(name="tickets", value="tickets"),
+            app_commands.Choice(name="feature_permissions", value="feature_permissions"),
+        ]
+    )
+    @is_admin()
+    async def set_log_channel_advanced(
+        self,
+        interaction: discord.Interaction,
+        kind: app_commands.Choice[str],
+        channel: discord.TextChannel,
+    ):
+        """Set log channel for a specific category"""
+        await set_log_channel(self.db, interaction.guild.id, kind.value, channel.id)
+        if kind.value == "default":
+            await self.db.update_guild(interaction.guild.id, {"log_channel": channel.id})
+        embed = EmbedFactory.success(
+            "Log Channel Updated",
+            f"Logs for **{kind.value}** will be sent to {channel.mention}"
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.info(f"Log channel ({kind.value}) set to {channel} in {interaction.guild}")
 
     @app_commands.command(name="config", description="View server configuration")
     @is_admin()
@@ -158,6 +197,11 @@ class Admin(commands.Cog):
             return
 
         log_channel = f"<#{guild_config.get('log_channel')}>" if guild_config.get('log_channel') else "Not set"
+        log_channels = guild_config.get("log_channels", {}) or {}
+        formatted_logs = []
+        for key, cid in log_channels.items():
+            formatted_logs.append(f"{key}: <#{cid}>")
+        log_channels_text = "\n".join(formatted_logs) if formatted_logs else "Not set"
         welcome_channel = f"<#{guild_config.get('welcome_channel')}>" if guild_config.get('welcome_channel') else "Not set"
         verified_role = f"<@&{guild_config.get('verified_role')}>" if guild_config.get('verified_role') else "Not set"
 
@@ -165,7 +209,8 @@ class Admin(commands.Cog):
             title="⚙️ Server Configuration",
             color=EmbedColor.INFO,
             fields=[
-                {"name": "Log Channel", "value": log_channel, "inline": False},
+                {"name": "Log Channel (default)", "value": log_channel, "inline": False},
+                {"name": "Log Channels (per type)", "value": log_channels_text, "inline": False},
                 {"name": "Welcome Channel", "value": welcome_channel, "inline": False},
                 {"name": "Verified Role", "value": verified_role, "inline": False},
                 {"name": "Verification Type", "value": guild_config.get('verification_type', 'button'), "inline": True}

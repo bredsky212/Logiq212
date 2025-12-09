@@ -4,6 +4,7 @@ Handles async MongoDB operations with connection pooling
 """
 
 import asyncio
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 import logging
@@ -97,6 +98,11 @@ class DatabaseManager:
         """Access suspensions collection"""
         return self.db.suspensions if self.db is not None else None
 
+    @property
+    def guild_security(self):
+        """Access guild security collection"""
+        return self.db.guild_security if self.db is not None else None
+
     async def _ensure_indexes(self) -> None:
         """Ensure required indexes are present"""
         if self.db is None:
@@ -118,6 +124,7 @@ class DatabaseManager:
             await self.db.feature_permissions_audit.create_index([("guild_id", 1), ("at", -1)])
             await self.db.suspensions.create_index([("guild_id", 1), ("user_id", 1), ("active", 1)])
             await self.db.suspensions.create_index([("guild_id", 1), ("ends_at", 1)])
+            await self.db.guild_security.create_index([("guild_id", 1)], unique=True)
         except Exception as e:
             logger.warning(f"Failed to ensure database indexes: {e}")
 
@@ -352,6 +359,50 @@ class DatabaseManager:
         """Insert feature permission audit entry"""
         result = await self.feature_permissions_audit.insert_one(audit_doc)
         return str(result.inserted_id)
+
+    # Guild security operations
+    async def get_guild_security(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        """Get guild security configuration"""
+        if self.guild_security is None:
+            return None
+        return await self.guild_security.find_one({"guild_id": guild_id})
+
+    async def upsert_guild_security(self, guild_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Upsert guild security configuration"""
+        if self.guild_security is None:
+            raise RuntimeError("guild_security collection not available")
+        from datetime import datetime
+        update = {"guild_id": guild_id, **payload}
+        update["updated_at"] = payload.get("updated_at", datetime.utcnow())
+        update.setdefault("created_at", datetime.utcnow())
+        await self.guild_security.update_one(
+            {"guild_id": guild_id},
+            {"$set": update},
+            upsert=True
+        )
+        return await self.get_guild_security(guild_id)
+
+    async def add_protected_role(self, guild_id: int, role_id: int) -> Dict[str, Any]:
+        """Add a protected role to guild security config."""
+        if self.guild_security is None:
+            raise RuntimeError("guild_security collection not available")
+        await self.guild_security.update_one(
+            {"guild_id": guild_id},
+            {"$addToSet": {"protected_role_ids": role_id}, "$setOnInsert": {"created_at": datetime.utcnow()}, "$set": {"updated_at": datetime.utcnow()}},
+            upsert=True,
+        )
+        return await self.get_guild_security(guild_id)
+
+    async def remove_protected_role(self, guild_id: int, role_id: int) -> Dict[str, Any]:
+        """Remove a protected role from guild security config."""
+        if self.guild_security is None:
+            raise RuntimeError("guild_security collection not available")
+        await self.guild_security.update_one(
+            {"guild_id": guild_id},
+            {"$pull": {"protected_role_ids": role_id}, "$set": {"updated_at": datetime.utcnow()}},
+            upsert=True,
+        )
+        return await self.get_guild_security(guild_id)
 
     # Suspension operations
     async def create_suspension(self, data: Dict[str, Any]) -> str:

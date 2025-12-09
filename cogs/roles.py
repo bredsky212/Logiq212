@@ -10,8 +10,11 @@ from typing import Optional, List
 import logging
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
+from utils.security import filter_protected_roles, get_or_bootstrap_security
 
 logger = logging.getLogger(__name__)
 
@@ -73,24 +76,30 @@ class RoleMenuSetupModal(discord.ui.Modal, title="Create Role Menu"):
             )
             return
 
+        parsed_roles = []
         for role_id in role_ids:
             role = interaction.guild.get_role(int(role_id))
             if role:
-                # Skip @everyone and bot integration roles
-                if role.is_default() or role.is_integration():
-                    continue
-                    
-                role_emoji = None
-                if role.unicode_emoji:
-                    role_emoji = role.unicode_emoji
-                elif role.icon:
-                    role_emoji = str(role.icon)
+                parsed_roles.append(role)
 
-                role_list.append({
-                    'role': role,
-                    'emoji': role_emoji or "🎭",
-                    'label': role.name
-                })
+        parsed_roles = await filter_protected_roles(self.cog.db, interaction.guild, parsed_roles)
+
+        for role in parsed_roles:
+            # Skip @everyone and bot integration roles
+            if role.is_default() or role.is_integration():
+                continue
+
+            role_emoji = None
+            if role.unicode_emoji:
+                role_emoji = role.unicode_emoji
+            elif role.icon:
+                role_emoji = str(role.icon)
+
+            role_list.append({
+                'role': role,
+                'emoji': role_emoji or "🎭",
+                'label': role.name
+            })
 
         if not role_list:
             await interaction.response.send_message(
@@ -123,9 +132,9 @@ class RoleMenuSetupModal(discord.ui.Modal, title="Create Role Menu"):
 
         # Create view
         if is_exclusive:
-            view = ExclusiveRoleView(role_list, self.title_input.value)
+            view = ExclusiveRoleView(role_list, self.title_input.value, self.cog)
         else:
-            view = MultiRoleView(role_list)
+            view = MultiRoleView(role_list, self.cog)
 
         # Send to channel
         await self.channel.send(embed=embed, view=view)
@@ -145,7 +154,7 @@ class RoleMenuSetupModal(discord.ui.Modal, title="Create Role Menu"):
 class ExclusiveRoleSelect(discord.ui.Select):
     """Dropdown for exclusive role selection (pick only one)"""
 
-    def __init__(self, role_data: List[dict], category_name: str):
+    def __init__(self, role_data: List[dict], category_name: str, cog: 'Roles'):
         options = [
             discord.SelectOption(
                 label=r['label'],
@@ -164,6 +173,7 @@ class ExclusiveRoleSelect(discord.ui.Select):
             custom_id=f"exclusive_role_{category_name[:50]}"
         )
         self.role_ids = [r['role'].id for r in role_data]
+        self.cog = cog
 
     async def callback(self, interaction: discord.Interaction):
         """Handle exclusive role selection - LOCKED after first selection"""
@@ -198,6 +208,14 @@ class ExclusiveRoleSelect(discord.ui.Select):
                 )
                 return
 
+            filtered = await filter_protected_roles(self.cog.db, interaction.guild, [selected_role])
+            if not filtered:
+                await interaction.response.send_message(
+                    embed=EmbedFactory.error("Protected Role", "This role is protected and cannot be assigned by the bot."),
+                    ephemeral=True
+                )
+                return
+
             # Give the selected role (only this one, no removing others)
             await interaction.user.add_roles(selected_role, reason="Exclusive role menu selection")
 
@@ -226,7 +244,7 @@ class ExclusiveRoleSelect(discord.ui.Select):
 class MultiRoleSelect(discord.ui.Select):
     """Dropdown menu for multiple role selection"""
 
-    def __init__(self, role_data: List[dict]):
+    def __init__(self, role_data: List[dict], cog: 'Roles'):
         options = [
             discord.SelectOption(
                 label=r['label'],
@@ -244,6 +262,7 @@ class MultiRoleSelect(discord.ui.Select):
             options=options,
             custom_id="multi_role_select"
         )
+        self.cog = cog
 
     async def callback(self, interaction: discord.Interaction):
         """Handle role selection"""
@@ -267,9 +286,18 @@ class MultiRoleSelect(discord.ui.Select):
                     roles_to_remove.append(role)
 
             if roles_to_add:
+                roles_to_add = await filter_protected_roles(self.cog.db, interaction.guild, roles_to_add)
+                if not roles_to_add:
+                    await interaction.response.send_message(
+                        embed=EmbedFactory.error("Protected Role", "Selected roles are protected and cannot be assigned by the bot."),
+                        ephemeral=True
+                    )
+                    return
                 await interaction.user.add_roles(*roles_to_add, reason="Role menu selection")
             if roles_to_remove:
-                await interaction.user.remove_roles(*roles_to_remove, reason="Role menu deselection")
+                roles_to_remove = await filter_protected_roles(self.cog.db, interaction.guild, roles_to_remove)
+                if roles_to_remove:
+                    await interaction.user.remove_roles(*roles_to_remove, reason="Role menu deselection")
 
             changes = []
             if roles_to_add:
@@ -302,17 +330,17 @@ class MultiRoleSelect(discord.ui.Select):
 class ExclusiveRoleView(discord.ui.View):
     """View for exclusive role selection"""
 
-    def __init__(self, role_data: List[dict], category_name: str):
+    def __init__(self, role_data: List[dict], category_name: str, cog: 'Roles'):
         super().__init__(timeout=None)
-        self.add_item(ExclusiveRoleSelect(role_data, category_name))
+        self.add_item(ExclusiveRoleSelect(role_data, category_name, cog))
 
 
 class MultiRoleView(discord.ui.View):
     """View for multi role selection"""
 
-    def __init__(self, role_data: List[dict]):
+    def __init__(self, role_data: List[dict], cog: 'Roles'):
         super().__init__(timeout=None)
-        self.add_item(MultiRoleSelect(role_data))
+        self.add_item(MultiRoleSelect(role_data, cog))
 
 
 class Roles(commands.Cog):
@@ -323,14 +351,83 @@ class Roles(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('roles', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
         # Register persistent views on startup
         self.bot.loop.create_task(self._register_persistent_views())
-    
+
     async def _register_persistent_views(self):
         """Register persistent views for role menus"""
         await self.bot.wait_until_ready()
         # Views are automatically re-registered when messages are loaded
         logger.info("Role menu persistent views ready")
+
+    async def _filter_protected(self, roles: List[discord.Role]) -> List[discord.Role]:
+        return await filter_protected_roles(self.db, roles[0].guild, roles)
+
+    def _base_role_menu_check(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_roles or perms.manage_guild or perms.administrator or member == member.guild.owner
+
+    async def _can_use_feature(self, member: discord.Member, feature: FeatureKey, base_check) -> bool:
+        return await self.perms.check(member, feature, base_check)
+
+    def _hierarchy_block(self, moderator: discord.Member, target: discord.Member) -> Optional[str]:
+        if target == moderator.guild.owner:
+            return "You cannot act on the server owner."
+        if target.guild_permissions.administrator:
+            return "You cannot act on an administrator."
+        if target.top_role >= moderator.top_role and moderator != moderator.guild.owner:
+            return "You cannot act on a member with an equal or higher top role."
+        return None
+
+    def _role_position_block(self, moderator: discord.Member, role: discord.Role) -> Optional[str]:
+        if moderator == moderator.guild.owner:
+            return None
+        if role.is_default():
+            return "You cannot manage the @everyone role."
+        if role >= moderator.top_role:
+            return "You cannot manage a role that is equal to or higher than your top role."
+        return None
+
+    def _bot_role_block(self, guild: discord.Guild, role: discord.Role) -> Optional[str]:
+        bot_member = guild.me
+        if not bot_member:
+            return None
+        if role >= bot_member.top_role:
+            return "I cannot manage that role because it is higher than or equal to my top role."
+        if not bot_member.guild_permissions.manage_roles:
+            return "I do not have the Manage Roles permission."
+        return None
+
+    async def _log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "roles", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send roles log to channel {channel} in {guild}")
 
     @app_commands.command(name="create-role-menu", description="Create a role menu (Admin)")
     @app_commands.describe(
@@ -349,7 +446,6 @@ class Roles(commands.Cog):
         exclusive="Can users only pick ONE role? (yes/no)",
         channel="Channel to send menu (optional)"
     )
-    @is_admin()
     async def create_role_menu(
         self,
         interaction: discord.Interaction,
@@ -369,9 +465,18 @@ class Roles(commands.Cog):
         channel: Optional[discord.TextChannel] = None
     ):
         """Create role menu directly with slash command"""
+        if not await self._can_use_feature(interaction.user, FeatureKey.ROLES_MENU_MANAGE, self._base_role_menu_check):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to create role menus."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ROLES_MENU_MANAGE, "create-role-menu")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
         target_channel = channel or interaction.channel
         is_exclusive = exclusive.lower() in ['yes', 'y', 'true']
-        
+
         # Collect all roles
         roles = [role1]
         if role2:
@@ -395,7 +500,8 @@ class Roles(commands.Cog):
         
         # Build role list
         role_list = []
-        for role in roles:
+        protected_filtered = await self._filter_protected(roles)
+        for role in protected_filtered:
             if role.is_default() or role.is_integration():
                 continue
             
@@ -410,14 +516,14 @@ class Roles(commands.Cog):
                 'emoji': role_emoji or "🎭",
                 'label': role.name
             })
-        
+
         if not role_list:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("No Valid Roles", "Please select valid roles."),
                 ephemeral=True
             )
             return
-        
+
         # Create embed
         embed = EmbedFactory.create(
             title=title,
@@ -435,14 +541,14 @@ class Roles(commands.Cog):
         
         # Create view
         if is_exclusive:
-            view = ExclusiveRoleView(role_list, title)
+            view = ExclusiveRoleView(role_list, title, self)
         else:
-            view = MultiRoleView(role_list)
-        
+            view = MultiRoleView(role_list, self)
+
         # Send to channel
         await target_channel.send(embed=embed, view=view)
-        
-        await interaction.response.send_message(
+
+        await interaction.followup.send(
             embed=EmbedFactory.success(
                 "Role Menu Created!",
                 f"{'Exclusive' if is_exclusive else 'Multi-select'} role menu created in {target_channel.mention}"
@@ -454,46 +560,128 @@ class Roles(commands.Cog):
 
     @app_commands.command(name="addrole", description="Add a role to a user (Admin)")
     @app_commands.describe(user="User to add role to", role="Role to add")
-    @is_admin()
     async def add_role(self, interaction: discord.Interaction, user: discord.Member, role: discord.Role):
         """Add role to user"""
-        if role in user.roles:
+        if not await self._can_use_feature(interaction.user, FeatureKey.ROLES_FORCE_ASSIGN, self._base_role_menu_check):
             await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to force-assign roles."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ROLES_FORCE_ASSIGN, "addrole")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        filtered = await filter_protected_roles(self.db, interaction.guild, [role])
+        if not filtered:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Protected Role", "This role is protected and cannot be assigned by the bot."),
+                ephemeral=True
+            )
+            return
+
+        if role in user.roles:
+            await interaction.followup.send(
                 embed=EmbedFactory.info("Already Has Role", f"{user.mention} already has {role.mention}"),
                 ephemeral=True
             )
             return
 
+        hierarchy_reason = self._hierarchy_block(interaction.user, user)
+        if hierarchy_reason:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Permission Denied", hierarchy_reason),
+                ephemeral=True
+            )
+            return
+
+        position_block = self._role_position_block(interaction.user, role)
+        if position_block:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Cannot Manage Role", position_block),
+                ephemeral=True
+            )
+            return
+
+        bot_block = self._bot_role_block(interaction.guild, role)
+        if bot_block:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Bot Cannot Manage Role", bot_block),
+                ephemeral=True
+            )
+            return
+
         try:
-            await user.add_roles(role)
+            await user.add_roles(role, reason="Forced role assignment via /addrole")
             embed = EmbedFactory.success("Role Added", f"Added {role.mention} to {user.mention}")
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"{interaction.user} added role {role} to {user}")
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Error", "I don't have permission to manage roles"),
                 ephemeral=True
             )
 
     @app_commands.command(name="removerole", description="Remove a role from a user (Admin)")
     @app_commands.describe(user="User to remove role from", role="Role to remove")
-    @is_admin()
     async def remove_role(self, interaction: discord.Interaction, user: discord.Member, role: discord.Role):
         """Remove role from user"""
-        if role not in user.roles:
+        if not await self._can_use_feature(interaction.user, FeatureKey.ROLES_FORCE_ASSIGN, self._base_role_menu_check):
             await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to force-remove roles."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ROLES_FORCE_ASSIGN, "removerole")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        filtered = await filter_protected_roles(self.db, interaction.guild, [role])
+        if not filtered:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Protected Role", "This role is protected and cannot be removed by the bot."),
+                ephemeral=True
+            )
+            return
+
+        if role not in user.roles:
+            await interaction.followup.send(
                 embed=EmbedFactory.info("Doesn't Have Role", f"{user.mention} doesn't have {role.mention}"),
                 ephemeral=True
             )
             return
 
+        hierarchy_reason = self._hierarchy_block(interaction.user, user)
+        if hierarchy_reason:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Permission Denied", hierarchy_reason),
+                ephemeral=True
+            )
+            return
+
+        position_block = self._role_position_block(interaction.user, role)
+        if position_block:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Cannot Manage Role", position_block),
+                ephemeral=True
+            )
+            return
+
+        bot_block = self._bot_role_block(interaction.guild, role)
+        if bot_block:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Bot Cannot Manage Role", bot_block),
+                ephemeral=True
+            )
+            return
+
         try:
-            await user.remove_roles(role)
+            await user.remove_roles(role, reason="Forced role removal via /removerole")
             embed = EmbedFactory.success("Role Removed", f"Removed {role.mention} from {user.mention}")
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"{interaction.user} removed role {role} from {user}")
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Error", "I don't have permission to manage roles"),
                 ephemeral=True
             )

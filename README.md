@@ -116,10 +116,44 @@ python main.py
 
 ### 🔐 Permissions & Roles (Feature Keys)
 - Configure with `/perms feature-*` (Admin/Manage Guild). Admin/owner always bypass feature restrictions (but not Discord perms).
-- Staff applications: `staffapp.template.manage`, `staffapp.review`
-- Tickets: `tickets.admin`, `tickets.close` (optional: `tickets.create`)
-- Moderation: `mod.warn`, `mod.warnings`, `mod.timeout`, `mod.kick`, `mod.ban`, `mod.clear`, `mod.slowmode`, `mod.lock`, `mod.nickname`
-- VC moderation: `mod.vc_suspend`, `mod.vc_unsuspend`
+- Staff applications: `staffapp.template.manage`, `staffapp.review`; Tickets: `tickets.admin`, `tickets.close` (optional: `tickets.create`)
+- Moderation: `mod.warn`, `mod.warnings`, `mod.timeout`, `mod.kick`, `mod.ban`, `mod.clear`, `mod.slowmode`, `mod.lock`, `mod.nickname`; VC moderation: `mod.vc_suspend`, `mod.vc_unsuspend`
+- Verification & Games: `verify.config`, `games.panel.manage`
+- Roles & Economy: `roles.menu.manage`, `roles.force.assign`, `economy.admin.adjust`
+- Leveling & Giveaways: `leveling.admin.set`, `leveling.admin.reset`, `giveaway.create`, `giveaway.manage`
+- Music & Alerts: `music.dj.basic`, `music.dj.volume`, `alerts.manage`, `alerts.view`
+- Temp Voice, Utility, Analytics: `tempvoice.setup`, `tempvoice.owner.power`, `utility.poll`, `analytics.view`
+
+**Guild Security & Protected Roles**
+- Sensitive commands (ban/kick/timeout/lock/slowmode/VC suspend, tickets admin, staffapp template manage) are locked until an admin runs `/perms security-bootstrap` and confirms protected roles.
+- Protected roles (detected automatically: administrator/manage_guild) and the guild owner cannot be targeted by destructive actions or have roles assigned/removed by the bot.
+- Manage protected roles with `/perms security-protected-add|remove|list`; keep at least one protected role.
+
+## ⚙️ Config-Driven Modules
+- All cogs load by default. Add a `modules` block in `config.yaml` to selectively enable/disable cogs by file name:
+  ```yaml
+  modules:
+    tickets:
+      enabled: true
+    moderation:
+      enabled: true
+    report:
+      enabled: true
+    vcmod:
+      enabled: true
+    feature_permissions:
+      enabled: true
+    games:
+      enabled: false
+    music:
+      enabled: false
+  ```
+- Missing entries default to `enabled: true` for backward compatibility. Skipped cogs log as “Skipping cog <name> (disabled in config.modules)”.
+- See `config.minimal.example.yaml` for a moderation-only template (tickets, moderation/report, vcmod, perms, staff applications) with other cogs disabled.
+
+## 🧾 Logging Channels
+- Configure a default log channel with `/setlogchannel` (also seeds `log_channels.default`).
+- Use `/setlogchannel-advanced` to route specific events to dedicated channels: `reports`, `moderation`, `vcmod`, `tickets`, `feature_permissions` (fallback to `default` if unset).
 
 ### 🎁 Giveaway System
 - **Button-based entry** - Easy participation

@@ -32,6 +32,17 @@ This repo has a few gotchas when working on Windows/PowerShell with UTF‑8 cont
   cd path\to\repo; git status -sb
   ```
 
+## Using WSL for Multi-line Edits
+- For heredocs or large paste ops, prefer WSL bash from PowerShell to avoid quoting issues:
+  ```powershell
+  wsl bash -lc "cd /mnt/c/path/to/repo && cat <<'EOF' > docs/file.md
+  your
+  multi-line
+  content
+  EOF"
+  ```
+- Always use the `/mnt/c/...` path inside WSL; check `git status` afterward in PowerShell.
+- Keep files UTF-8 and watch for CRLF warnings.
 
 ## Quick Troubleshooting
 - **LF/CRLF warnings**: set Git `core.autocrlf=input` or ensure your editor saves with LF.

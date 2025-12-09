@@ -12,8 +12,12 @@ from typing import Optional
 import logging
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
+from utils.feature_permissions import FeaturePermissionManager
+from utils.security import filter_protected_roles
+from utils.logs import resolve_log_channel
+from utils.denials import DenialLogger
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +130,8 @@ class Verification(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('verification', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -280,16 +286,14 @@ class Verification(commands.Cog):
 
         except discord.Forbidden:
             logger.warning(f"Could not DM {member} in {member.guild} - DMs disabled")
-            log_channel_id = guild_config.get('log_channel')
-            if log_channel_id:
-                log_channel = member.guild.get_channel(log_channel_id)
-                if log_channel:
-                    await log_channel.send(
-                        embed=EmbedFactory.error(
-                            "Verification DM Failed",
-                            f"Could not send verification DM to {member.mention} (DMs disabled)"
-                        )
+            log_channel = await resolve_log_channel(self.db, member.guild, "moderation")
+            if log_channel:
+                await log_channel.send(
+                    embed=EmbedFactory.error(
+                        "Verification DM Failed",
+                        f"Could not send verification DM to {member.mention} (DMs disabled)"
                     )
+                )
 
     async def verify_user(self, interaction: discord.Interaction):
         """Verify a user and assign role (SILENT - no public announcements)"""
@@ -326,6 +330,14 @@ class Verification(commands.Cog):
 
         try:
             # Silently add verified role
+            filtered = await filter_protected_roles(self.db, interaction.guild, [verified_role])
+            if not filtered:
+                await interaction.response.send_message(
+                    embed=EmbedFactory.error("Protected Role", "The configured verified role is protected and cannot be assigned by the bot."),
+                    ephemeral=True
+                )
+                return
+
             await interaction.user.add_roles(verified_role)
 
             # Send private success message
@@ -352,6 +364,42 @@ class Verification(commands.Cog):
                 ephemeral=True
             )
 
+    def _base_verify_config(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_guild or perms.administrator or member == member.guild.owner
+
+    async def _check_verify_config(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.VERIFY_CONFIG, self._base_verify_config)
+
+    async def _log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "verification", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send verification log to channel {channel} in {guild}")
+
     @app_commands.command(name="setup-verification", description="Setup verification system (Admin)")
     @app_commands.describe(
         role="Role to assign upon verification",
@@ -360,7 +408,6 @@ class Verification(commands.Cog):
         verify_channel="Channel for verification (REQUIRED if method is 'channel')",
         verification_type="Type of verification (button/captcha)"
     )
-    @is_admin()
     async def setup_verification(
         self,
         interaction: discord.Interaction,
@@ -371,6 +418,13 @@ class Verification(commands.Cog):
         verification_type: str = "button"
     ):
         """Setup verification system (ADMIN ONLY)"""
+        if not await self._check_verify_config(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You must be an administrator to use this command."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.VERIFY_CONFIG, "setup-verification")
+            return
         method = method.lower()
         
         if method not in ['dm', 'channel']:
@@ -400,9 +454,17 @@ class Verification(commands.Cog):
 
     @app_commands.command(name="set-welcome-message", description="Set custom welcome DM message (Admin)")
     @app_commands.describe(message="Custom welcome message for new members")
-    @is_admin()
     async def set_welcome_message(self, interaction: discord.Interaction, message: str):
         """Set custom welcome message for verification DMs (ADMIN ONLY)"""
+        if not await self._check_verify_config(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You must be an administrator to use this command."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.VERIFY_CONFIG, "set-welcome-message")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
         guild_config = await self.db.get_guild(interaction.guild.id)
         if not guild_config:
             guild_config = await self.db.create_guild(interaction.guild.id)
@@ -416,13 +478,19 @@ class Verification(commands.Cog):
             f"**New Welcome Message:**\n{message}\n\n"
             "This will be sent in DMs to new members along with the verification button."
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"Welcome message updated in {interaction.guild}")
 
     @app_commands.command(name="send-verification", description="Send verification button in current channel (Admin)")
-    @is_admin()
     async def send_verification(self, interaction: discord.Interaction):
         """Manually send verification button to current channel (ADMIN ONLY)"""
+        if not await self._check_verify_config(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You must be an administrator to use this command."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.VERIFY_CONFIG, "send-verification")
+            return
         guild_config = await self.db.get_guild(interaction.guild.id)
         if not guild_config or not guild_config.get('verified_role'):
             await interaction.response.send_message(

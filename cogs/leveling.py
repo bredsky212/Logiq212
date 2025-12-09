@@ -14,8 +14,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 from utils.embeds import EmbedFactory, EmbedColor
 from utils.constants import calculate_level_xp
-from utils.permissions import is_admin
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +30,45 @@ class Leveling(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('leveling', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
         self.xp_cooldown = {}
+
+    def _base_level_admin_check(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_guild or perms.administrator or member == member.guild.owner
+
+    async def _can_use(self, member: discord.Member, feature: FeatureKey) -> bool:
+        return await self.perms.check(member, feature, self._base_level_admin_check)
+
+    async def _log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "leveling", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send leveling log to channel {channel} in {guild}")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -83,7 +123,6 @@ class Leveling(commands.Cog):
         user="User to modify",
         level="New level"
     )
-    @is_admin()
     async def set_level(
         self,
         interaction: discord.Interaction,
@@ -91,8 +130,18 @@ class Leveling(commands.Cog):
         level: int
     ):
         """Set user level"""
-        if level < 0:
+        if not await self._can_use(interaction.user, FeatureKey.LEVELING_ADMIN_SET):
             await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to set levels."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.LEVELING_ADMIN_SET, "setlevel")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        if level < 0:
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid Level", "Level must be 0 or greater"),
                 ephemeral=True
             )
@@ -109,21 +158,35 @@ class Leveling(commands.Cog):
             "Level Set",
             f"Set {user.mention}'s level to **{level}**"
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"{interaction.user} set {user}'s level to {level}")
 
     @app_commands.command(name="resetlevels", description="Reset all levels (Admin)")
-    @is_admin()
     async def reset_levels(self, interaction: discord.Interaction):
         """Reset all levels in guild"""
+        if not await self._can_use(interaction.user, FeatureKey.LEVELING_ADMIN_RESET):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to reset levels."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.LEVELING_ADMIN_RESET, "resetlevels")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         # This would require a bulk update - implementing basic version
-        await interaction.response.send_message(
-            embed=EmbedFactory.warning(
-                "Reset Levels",
-                "This feature will reset all user levels. This is a destructive action.\n\n"
-                "To implement: Use database bulk operations to reset all users in this guild."
-            ),
-            ephemeral=True
+        warning_embed = EmbedFactory.warning(
+            "Reset Levels",
+            "This feature will reset all user levels. This is a destructive action.\n\n"
+            "To implement: Use database bulk operations to reset all users in this guild."
+        )
+        await interaction.followup.send(embed=warning_embed, ephemeral=True)
+        await self._log_to_mod(
+            interaction.guild,
+            EmbedFactory.info(
+                "Level Reset Requested",
+                f"{interaction.user.mention} invoked /resetlevels in {interaction.guild.name}."
+            )
         )
 
 

@@ -9,6 +9,22 @@ import discord
 
 from database.db_manager import DatabaseManager
 from database.models import FeatureKey, FeaturePermissionAudit
+from utils.denials import DenialLogger
+
+# Sensitive features that require security bootstrap acknowledgment.
+SENSITIVE_FEATURES = {
+    FeatureKey.MOD_BAN,
+    FeatureKey.MOD_KICK,
+    FeatureKey.MOD_TIMEOUT,
+    FeatureKey.MOD_CLEAR,
+    FeatureKey.MOD_LOCK,
+    FeatureKey.MOD_SLOWMODE,
+    FeatureKey.MOD_VC_SUSPEND,
+    FeatureKey.MOD_VC_UNSUSPEND,
+    FeatureKey.TICKETS_ADMIN,
+    FeatureKey.STAFFAPP_TEMPLATE_MANAGE,
+}
+from utils.security import get_or_bootstrap_security
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +34,12 @@ class FeaturePermissionManager:
 
     def __init__(self, db: DatabaseManager):
         self.db = db
+        self.denials = DenialLogger()
+
+    async def security_ready(self, guild: discord.Guild) -> bool:
+        """Return True if security bootstrap initialized."""
+        security = await get_or_bootstrap_security(self.db, guild)
+        return bool(security.get("initialized", False))
 
     async def check(
         self,
@@ -31,10 +53,11 @@ class FeaturePermissionManager:
         Rules:
         1) Owner/Admin always allowed.
         2) Base check must pass (Discord perms, local logic).
-        3) If no feature doc -> allow.
-        4) Deny if member has any denied role.
-        5) If allowed_roles empty -> allow.
-        6) Else require at least one allowed role.
+        3) Sensitive features require security bootstrap to be initialized.
+        4) If no feature doc -> allow.
+        5) Deny if member has any denied role.
+        6) If allowed_roles empty -> allow.
+        7) Else require at least one allowed role.
         """
         if member.guild is None:
             return False
@@ -44,6 +67,19 @@ class FeaturePermissionManager:
 
         if not base_check(member):
             return False
+
+        # Sensitive features locked until security bootstrap completes
+        if feature_key in SENSITIVE_FEATURES:
+            security = await get_or_bootstrap_security(self.db, member.guild)
+            if not security.get("initialized", False):
+                if self.denials and hasattr(self.denials, "should_log"):
+                    if self.denials.should_log(member.guild.id, member.id, "feature_perms", feature_key.value):
+                        logger.warning(
+                            "Sensitive feature %s denied because guild security not initialized for guild %s",
+                            feature_key.value,
+                            member.guild.id,
+                        )
+                return False
 
         doc = await self.db.get_feature_permission(member.guild.id, feature_key.value)
         if not doc:
