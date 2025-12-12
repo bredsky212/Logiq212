@@ -6,13 +6,16 @@ Support ticket system
 import discord
 from discord import app_commands
 from discord.ext import commands
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
 import asyncio
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
+from utils.logs import resolve_log_channel
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,39 @@ class Tickets(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('tickets', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        channel = await resolve_log_channel(self.db, guild, "tickets")
+        if not channel:
+            return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send ticket log to {channel} in guild {guild.id}")
+
+    def _base_check_tickets_admin(self, member: discord.Member) -> bool:
+        return member.guild_permissions.administrator or member.guild_permissions.manage_guild or member == member.guild.owner
+
+    def _base_check_tickets_close(self, member: discord.Member, guild_config: Dict[str, Any], interaction: discord.Interaction) -> bool:
+        # Ticket owner always allowed
+        if interaction.channel and interaction.channel.name == f"ticket-{member.name}":
+            return True
+        support_role_id = guild_config.get('support_role') if guild_config else None
+        has_support_role = support_role_id and member.guild.get_role(support_role_id) in member.roles
+        return member.guild_permissions.administrator or has_support_role
+
+    async def _maybe_log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "tickets", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
 
     async def create_ticket_for_user(self, interaction: discord.Interaction):
         """Create a ticket for a user"""
@@ -142,19 +178,17 @@ class Tickets(commands.Cog):
             await channel.send(embed=embed, view=close_view)
             
             # Log ticket creation to ticket log channel
-            ticket_log_channel_id = guild_config.get('ticket_log_channel')
-            if ticket_log_channel_id:
-                log_channel = interaction.guild.get_channel(ticket_log_channel_id)
-                if log_channel:
-                    log_embed = EmbedFactory.create(
-                        title="🎫 New Ticket Created",
-                        description=f"**Ticket:** {channel.mention}\n"
-                                   f"**Created by:** {interaction.user.mention}\n"
-                                   f"**Ticket ID:** {ticket_id}\n"
-                                   f"**Status:** Open",
-                        color=EmbedColor.SUCCESS
-                    )
-                    await log_channel.send(embed=log_embed)
+            log_channel = await resolve_log_channel(self.db, interaction.guild, "tickets")
+            if log_channel:
+                log_embed = EmbedFactory.create(
+                    title="🎫 New Ticket Created",
+                    description=f"**Ticket:** {channel.mention}\n"
+                               f"**Created by:** {interaction.user.mention}\n"
+                               f"**Ticket ID:** {ticket_id}\n"
+                               f"**Status:** Open",
+                    color=EmbedColor.SUCCESS
+                )
+                await log_channel.send(embed=log_embed)
 
             await interaction.response.send_message(
                 embed=EmbedFactory.success(
@@ -190,33 +224,35 @@ class Tickets(commands.Cog):
         is_admin = interaction.user.guild_permissions.administrator
         has_support_role = support_role_id and interaction.guild.get_role(support_role_id) in interaction.user.roles
 
-        if not (is_ticket_owner or is_admin or has_support_role):
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("No Permission", "Only the ticket owner or staff can close this ticket"),
-                ephemeral=True
+        if not is_ticket_owner:
+            allowed = await self.perms.check(
+                interaction.user,
+                FeatureKey.TICKETS_CLOSE,
+                base_check=lambda m: is_admin or has_support_role
             )
-            return
+            if not allowed:
+                await interaction.response.send_message(
+                    embed=EmbedFactory.error("No Permission", "Only the ticket owner or staff can close this ticket"),
+                    ephemeral=True
+                )
+                await self._maybe_log_denial(interaction, FeatureKey.TICKETS_CLOSE, "close-ticket")
+                return
 
         # Find ticket in database by channel_id
         ticket_channel_id = interaction.channel.id
         
         # Log ticket closure to ticket log channel
-        ticket_log_channel_id = guild_config.get('ticket_log_channel') if guild_config else None
-        if ticket_log_channel_id:
-            log_channel = interaction.guild.get_channel(ticket_log_channel_id)
-            if log_channel:
-                # Get ticket creator from channel name
-                ticket_creator_name = interaction.channel.name.replace("ticket-", "")
-                
-                log_embed = EmbedFactory.create(
-                    title="🔒 Ticket Closed",
-                    description=f"**Ticket:** {interaction.channel.name}\n"
-                               f"**Closed by:** {interaction.user.mention}\n"
-                               f"**Reason:** {reason}\n"
-                               f"**Status:** Closed",
-                    color=EmbedColor.WARNING
-                )
-                await log_channel.send(embed=log_embed)
+        log_channel = await resolve_log_channel(self.db, interaction.guild, "tickets")
+        if log_channel:
+            log_embed = EmbedFactory.create(
+                title="🔒 Ticket Closed",
+                description=f"**Ticket:** {interaction.channel.name}\n"
+                           f"**Closed by:** {interaction.user.mention}\n"
+                           f"**Reason:** {reason}\n"
+                           f"**Status:** Closed",
+                color=EmbedColor.WARNING
+            )
+            await log_channel.send(embed=log_embed)
 
         embed = EmbedFactory.warning(
             "🔒 Ticket Closing",
@@ -254,7 +290,6 @@ class Tickets(commands.Cog):
         log_channel="Channel for ticket logs",
         support_role="Role to ping for new tickets (optional)"
     )
-    @is_admin()
     async def ticket_setup(
         self,
         interaction: discord.Interaction,
@@ -263,6 +298,17 @@ class Tickets(commands.Cog):
         support_role: Optional[discord.Role] = None
     ):
         """Setup ticket system (ADMIN ONLY)"""
+        if not await self.perms.check(
+            interaction.user,
+            FeatureKey.TICKETS_ADMIN,
+            base_check=self._base_check_tickets_admin
+        ):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot configure tickets."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.TICKETS_ADMIN, "ticket-setup")
+            return
         guild_config = await self.db.get_guild(interaction.guild.id)
         if not guild_config:
             guild_config = await self.db.create_guild(interaction.guild.id)
@@ -286,9 +332,19 @@ class Tickets(commands.Cog):
         logger.info(f"Ticket system setup in {interaction.guild}")
 
     @app_commands.command(name="ticket-panel", description="Send ticket creation panel (Admin)")
-    @is_admin()
     async def ticket_panel(self, interaction: discord.Interaction):
         """Send persistent ticket panel (ADMIN ONLY)"""
+        if not await self.perms.check(
+            interaction.user,
+            FeatureKey.TICKETS_ADMIN,
+            base_check=self._base_check_tickets_admin
+        ):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot create ticket panels."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.TICKETS_ADMIN, "ticket-panel")
+            return
         embed = EmbedFactory.create(
             title="🎫 Support Tickets",
             description="Need help? Click the button below to create a support ticket!\n\n"
@@ -297,11 +353,9 @@ class Tickets(commands.Cog):
         )
 
         view = TicketCreateView(self)
-        await interaction.channel.send(embed=embed, view=view)
-
         await interaction.response.send_message(
-            embed=EmbedFactory.success("Panel Sent", "Ticket panel created with persistent button!"),
-            ephemeral=True
+            embed=embed,
+            view=view
         )
 
     @app_commands.command(name="close-ticket", description="Close a ticket (Admin/Staff)")
@@ -311,9 +365,19 @@ class Tickets(commands.Cog):
         await self.close_ticket_for_user(interaction, reason)
 
     @app_commands.command(name="tickets", description="View all active tickets (Admin)")
-    @is_admin()
     async def view_tickets(self, interaction: discord.Interaction):
         """View all active tickets (ADMIN ONLY)"""
+        if not await self.perms.check(
+            interaction.user,
+            FeatureKey.TICKETS_ADMIN,
+            base_check=self._base_check_tickets_admin
+        ):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("No Permission", "You cannot view tickets."),
+                ephemeral=True
+            )
+            await self._maybe_log_denial(interaction, FeatureKey.TICKETS_ADMIN, "tickets-list")
+            return
         guild_config = await self.db.get_guild(interaction.guild.id)
         if not guild_config:
             await interaction.response.send_message(

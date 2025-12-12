@@ -75,6 +75,13 @@ class BotLogger:
             date_format=config.get("date_format", "%Y-%m-%d %H:%M:%S")
         )
 
+        # Ensure other module loggers propagate to handlers
+        root = logging.getLogger()
+        root.setLevel(self.logger.level)
+        for handler in self.logger.handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+
     def debug(self, message: str) -> None:
         """Log debug message"""
         self.logger.debug(message)

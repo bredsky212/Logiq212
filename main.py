@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 import yaml
 from dotenv import load_dotenv
+from discord import app_commands
+from discord.app_commands.errors import CommandSignatureMismatch
 
 from database.db_manager import DatabaseManager
 from utils.logger import BotLogger
@@ -52,6 +54,7 @@ class Logiq(commands.Bot):
         pool_size = db_config.get('pool_size', 10)
 
         self.db = DatabaseManager(mongodb_uri, database_name, pool_size)
+        self.perms = None  # initialized in setup_hook
 
     async def setup_hook(self):
         """Setup hook - called when bot is starting"""
@@ -61,6 +64,9 @@ class Logiq(commands.Bot):
         try:
             await self.db.connect()
             self.logger.info("Database connected successfully")
+            # Attach global feature permission manager
+            from utils.feature_permissions import FeaturePermissionManager
+            self.perms = FeaturePermissionManager(self.db)
         except Exception as e:
             self.logger.error(f"Failed to connect to database: {e}", exc_info=True)
             sys.exit(1)
@@ -68,21 +74,105 @@ class Logiq(commands.Bot):
         # Load cogs
         await self.load_cogs()
 
+        async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+            log = logging.getLogger("logiq.app_commands")
+            qualified = getattr(interaction.command, "qualified_name", "unknown")
+
+            if isinstance(error, CommandSignatureMismatch):
+                log.warning(
+                    "Command signature mismatch for %s; attempting re-sync",
+                    qualified,
+                )
+                # Keep the interaction alive to avoid "Unknown interaction"
+                if not interaction.response.is_done():
+                    try:
+                        await interaction.response.defer(ephemeral=True, thinking=True)
+                    except Exception:
+                        log.exception("Failed to defer interaction after signature mismatch")
+                try:
+                    if interaction.guild:
+                        await self.tree.sync(guild=interaction.guild)
+                    else:
+                        await self.tree.sync()
+                except Exception:
+                    log.exception("Failed to resync after signature mismatch")
+                try:
+                    msg = "Les commandes ont été rafraîchies. Réessaie dans quelques secondes."
+                    if interaction.response.is_done():
+                        await interaction.followup.send(msg, ephemeral=True)
+                    else:
+                        await interaction.response.send_message(msg, ephemeral=True)
+                except Exception:
+                    log.exception("Failed to send signature-mismatch response")
+                return
+
+            log.error(
+                "App command error in %s: %r",
+                qualified,
+                error,
+                exc_info=True,
+            )
+            try:
+                msg = "Une erreur interne est survenue lors de l'execution de cette commande."
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                log.exception("Failed to send app command error response")
+
+        self.tree.on_error = on_tree_error
+
+    @commands.command(name="sync")
+    @commands.has_permissions(administrator=True)
+    async def sync_commands(self, ctx: commands.Context, spec: str | None = None):
+        """
+        Admin/owner helper to resync application commands.
+
+        Usage:
+          !sync            -> global sync (can take time to propagate)
+          !sync ~          -> sync this guild only
+          !sync *          -> copy globals to this guild, then sync
+          !sync ^          -> clear this guild's commands, then sync from globals
+        """
+        tree = self.tree
+        guild = ctx.guild
+
+        if spec == "~":
+            synced = await tree.sync(guild=guild)
+            await ctx.send(f"✅ Synced {len(synced)} commands to this guild (~).")
+        elif spec == "*":
+            tree.copy_global_to(guild=guild)
+            synced = await tree.sync(guild=guild)
+            await ctx.send(f"✅ Copied globals and synced {len(synced)} commands to this guild (*).")
+        elif spec == "^":
+            tree.clear_commands(guild=guild)
+            synced = await tree.sync(guild=guild)
+            await ctx.send(f"✅ Cleared and synced {len(synced)} commands for this guild (^).")
+        else:
+            synced = await tree.sync()
+            await ctx.send(f"✅ Globally synced {len(synced)} commands.")
+
     async def load_cogs(self):
-        """Load all cogs from cogs directory"""
+        """Load all cogs from cogs directory, honoring config.modules enables."""
         cogs_dir = Path(__file__).parent / 'cogs'
         cog_files = [f.stem for f in cogs_dir.glob('*.py') if f.stem != '__init__']
 
         self.logger.info(f"Loading {len(cog_files)} cogs...")
 
+        loaded = 0
         for cog in cog_files:
+            if not is_cog_enabled(self.config, cog):
+                self.logger.info(f"Skipping cog {cog} (disabled in config.modules)")
+                continue
             try:
                 await self.load_extension(f'cogs.{cog}')
                 self.logger.cog_load(cog)
+                loaded += 1
             except Exception as e:
                 self.logger.error(f"Failed to load cog {cog}: {e}", exc_info=True)
 
-        self.logger.info(f"Successfully loaded {len(self.cogs)} cogs")
+        self.logger.info(f"Successfully loaded {loaded} cogs")
 
     async def on_ready(self):
         """Called when bot is ready"""
@@ -142,6 +232,28 @@ class Logiq(commands.Bot):
         await self.db.disconnect()
         await super().close()
 
+    async def on_app_command_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        """Global handler for app command errors to avoid timeouts"""
+        log = logging.getLogger("logiq.app_commands")
+        log.error(
+            "App command error in %s: %r",
+            getattr(interaction.command, "qualified_name", "unknown"),
+            error,
+            exc_info=True,
+        )
+        try:
+            msg = "Une erreur interne est survenue lors de l'execution de cette commande."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except Exception:
+            log.error("Failed to send app command error response", exc_info=True)
+
 
 def load_config(config_path: str = 'config.yaml') -> dict:
     """Load configuration from YAML file"""
@@ -169,6 +281,22 @@ def load_config(config_path: str = 'config.yaml') -> dict:
     except yaml.YAMLError as e:
         print(f"Error parsing config file: {e}")
         sys.exit(1)
+
+
+def is_cog_enabled(config: dict, cog_name: str) -> bool:
+    """
+    Determine whether a cog should be loaded based on config.modules.<cog>.enabled.
+    Defaults to True when modules block or cog entry is missing.
+    """
+    modules_cfg = config.get("modules") or {}
+    cog_cfg = modules_cfg.get(cog_name)
+    if cog_cfg is None:
+        return True
+    if isinstance(cog_cfg, dict):
+        return cog_cfg.get("enabled", True)
+    if isinstance(cog_cfg, bool):
+        return cog_cfg
+    return True
 
 
 async def start_web_server(bot: Logiq):

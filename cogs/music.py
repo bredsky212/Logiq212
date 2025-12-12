@@ -11,8 +11,10 @@ import logging
 import asyncio
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +136,8 @@ class Music(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('music', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
         self.queues = {}  # guild_id: MusicQueue
 
     def get_queue(self, guild_id: int) -> MusicQueue:
@@ -142,10 +146,64 @@ class Music(commands.Cog):
             self.queues[guild_id] = MusicQueue()
         return self.queues[guild_id]
 
+    def _base_basic_check(self, member: discord.Member) -> bool:
+        # Default open; feature overrides can restrict if configured
+        return True
+
+    def _base_volume_check(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        if perms.manage_channels or perms.manage_guild or perms.administrator or member == member.guild.owner:
+            return True
+        # Allow common DJ role names to satisfy the base floor if present
+        return any(role.name.lower() == "dj" for role in member.roles)
+
+    async def _can_use_basic(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.MUSIC_DJ_BASIC, self._base_basic_check)
+
+    async def _can_use_volume(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.MUSIC_DJ_VOLUME, self._base_volume_check)
+
+    async def _log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "music", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send music log to channel {channel} in {guild}")
+
     @app_commands.command(name="play", description="Play music from YouTube")
     @app_commands.describe(query="Song name or YouTube URL")
     async def play(self, interaction: discord.Interaction, query: str):
         """Play music from YouTube"""
+        if not await self._can_use_basic(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to control music."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_BASIC, "play")
+            return
+
         # Check if user is in voice channel
         if not interaction.user.voice:
             await interaction.response.send_message(
@@ -184,6 +242,14 @@ class Music(commands.Cog):
     @app_commands.command(name="join", description="Join your voice channel")
     async def join(self, interaction: discord.Interaction):
         """Join voice channel"""
+        if not await self._can_use_basic(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to control music."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_BASIC, "join")
+            return
+
         if not interaction.user.voice:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Not in Voice", "You must be in a voice channel"),
@@ -204,6 +270,14 @@ class Music(commands.Cog):
     @app_commands.command(name="leave", description="Leave voice channel")
     async def leave(self, interaction: discord.Interaction):
         """Leave voice channel"""
+        if not await self._can_use_basic(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to control music."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_BASIC, "leave")
+            return
+
         if not interaction.guild.voice_client:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Not Connected", "I'm not in a voice channel"),
@@ -222,6 +296,14 @@ class Music(commands.Cog):
     @app_commands.command(name="queue", description="View music queue")
     async def view_queue(self, interaction: discord.Interaction):
         """View music queue"""
+        if not await self._can_use_basic(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to control music."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_BASIC, "queue")
+            return
+
         guild_id = interaction.guild.id
         queue = self.get_queue(guild_id)
 
@@ -252,6 +334,14 @@ class Music(commands.Cog):
     @app_commands.command(name="skip", description="Skip current track")
     async def skip(self, interaction: discord.Interaction):
         """Skip current track"""
+        if not await self._can_use_basic(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to control music."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_BASIC, "skip")
+            return
+
         if not interaction.guild.voice_client:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Not Playing", "No music is playing"),
@@ -273,6 +363,14 @@ class Music(commands.Cog):
     @app_commands.command(name="pause", description="Pause music")
     async def pause(self, interaction: discord.Interaction):
         """Pause music"""
+        if not await self._can_use_basic(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to control music."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_BASIC, "pause")
+            return
+
         if not interaction.guild.voice_client:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Not Playing", "No music is playing"),
@@ -294,6 +392,14 @@ class Music(commands.Cog):
     @app_commands.command(name="resume", description="Resume music")
     async def resume(self, interaction: discord.Interaction):
         """Resume music"""
+        if not await self._can_use_basic(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to control music."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_BASIC, "resume")
+            return
+
         if not interaction.guild.voice_client:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Not Playing", "No music is paused"),
@@ -314,9 +420,16 @@ class Music(commands.Cog):
 
     @app_commands.command(name="volume", description="Set volume (Admin)")
     @app_commands.describe(volume="Volume level (0-100)")
-    @is_admin()
     async def volume(self, interaction: discord.Interaction, volume: int):
         """Set volume"""
+        if not await self._can_use_volume(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to adjust volume."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_VOLUME, "volume")
+            return
+
         if volume < 0 or volume > 100:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Invalid Volume", "Volume must be between 0 and 100"),
@@ -338,6 +451,14 @@ class Music(commands.Cog):
     @app_commands.command(name="nowplaying", description="Show currently playing track")
     async def nowplaying(self, interaction: discord.Interaction):
         """Show currently playing track"""
+        if not await self._can_use_basic(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to control music."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.MUSIC_DJ_BASIC, "nowplaying")
+            return
+
         guild_id = interaction.guild.id
         queue = self.get_queue(guild_id)
 

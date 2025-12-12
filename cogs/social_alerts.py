@@ -12,8 +12,10 @@ import asyncio
 import aiohttp
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +28,53 @@ class SocialAlerts(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('social_alerts', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
         self.session = None
         # Start monitoring tasks
         self.check_alerts_task.start()
+
+    def _base_alert_manage(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_guild or perms.manage_channels or perms.administrator or member == member.guild.owner
+
+    def _base_alert_view(self, member: discord.Member) -> bool:
+        return True  # default open; overrides can restrict
+
+    async def _can_manage(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.ALERTS_MANAGE, self._base_alert_manage)
+
+    async def _can_view(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.ALERTS_VIEW, self._base_alert_view)
+
+    async def _log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "alerts", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send alerts log to channel {channel} in {guild}")
 
     def cog_unload(self):
         """Cleanup on cog unload"""
@@ -88,7 +134,6 @@ class SocialAlerts(commands.Cog):
         username="Username or channel ID",
         channel="Channel to send alerts to"
     )
-    @is_admin()
     async def add_alert(
         self,
         interaction: discord.Interaction,
@@ -97,9 +142,18 @@ class SocialAlerts(commands.Cog):
         channel: discord.TextChannel
     ):
         """Add social media alert (ADMIN ONLY)"""
+        if not await self._can_manage(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to manage alerts."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ALERTS_MANAGE, "alert-add")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
         platform = platform.lower()
         if platform not in ['twitch', 'youtube', 'twitter']:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid Platform", "Platform must be twitch, youtube, or twitter"),
                 ephemeral=True
             )
@@ -113,7 +167,7 @@ class SocialAlerts(commands.Cog):
         })
 
         if existing:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.warning("Already Exists", f"Alert for {username} on {platform} already exists"),
                 ephemeral=True
             )
@@ -144,7 +198,7 @@ class SocialAlerts(commands.Cog):
             f"**Channel:** {channel.mention}\n\n"
             f"You'll be notified when {username} {'goes live' if platform == 'twitch' else 'posts new content'}!"
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"{interaction.user} added {platform} alert for {username}")
 
     @app_commands.command(name="alert-remove", description="Remove social media alert (Admin)")
@@ -152,7 +206,6 @@ class SocialAlerts(commands.Cog):
         platform="Platform (twitch/youtube/twitter)",
         username="Username or channel ID"
     )
-    @is_admin()
     async def remove_alert(
         self,
         interaction: discord.Interaction,
@@ -160,9 +213,18 @@ class SocialAlerts(commands.Cog):
         username: str
     ):
         """Remove social media alert (ADMIN ONLY)"""
+        if not await self._can_manage(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to manage alerts."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ALERTS_MANAGE, "alert-remove")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
         platform = platform.lower()
         if platform not in ['twitch', 'youtube', 'twitter']:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid Platform", "Platform must be twitch, youtube, or twitter"),
                 ephemeral=True
             )
@@ -175,7 +237,7 @@ class SocialAlerts(commands.Cog):
         })
 
         if result.deleted_count == 0:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Not Found", f"No alert found for {username} on {platform}"),
                 ephemeral=True
             )
@@ -185,13 +247,20 @@ class SocialAlerts(commands.Cog):
             "Alert Removed",
             f"Removed {platform} alert for **{username}**"
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"{interaction.user} removed {platform} alert for {username}")
 
     @app_commands.command(name="alert-list", description="List all social media alerts (Admin)")
-    @is_admin()
     async def list_alerts(self, interaction: discord.Interaction):
         """List all social media alerts (ADMIN ONLY)"""
+        if not await self._can_view(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to view alerts."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ALERTS_VIEW, "alert-list")
+            return
+
         cursor = self.db.db.social_alerts.find({"guild_id": interaction.guild.id})
         alerts = await cursor.to_list(length=100)
 
@@ -235,7 +304,6 @@ class SocialAlerts(commands.Cog):
         platform="Platform (twitch/youtube/twitter)",
         username="Username to test"
     )
-    @is_admin()
     async def test_alert(
         self,
         interaction: discord.Interaction,
@@ -243,9 +311,18 @@ class SocialAlerts(commands.Cog):
         username: str
     ):
         """Test a social media alert (ADMIN ONLY)"""
+        if not await self._can_manage(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to manage alerts."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ALERTS_MANAGE, "alert-test")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
         platform = platform.lower()
         if platform not in ['twitch', 'youtube', 'twitter']:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid Platform", "Platform must be twitch, youtube, or twitter"),
                 ephemeral=True
             )
@@ -258,7 +335,7 @@ class SocialAlerts(commands.Cog):
         })
 
         if not alert:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Not Found", f"No alert found for {username} on {platform}"),
                 ephemeral=True
             )
@@ -266,7 +343,7 @@ class SocialAlerts(commands.Cog):
 
         channel = interaction.guild.get_channel(alert['channel_id'])
         if not channel:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Channel Not Found", "Alert channel no longer exists"),
                 ephemeral=True
             )
@@ -300,7 +377,7 @@ class SocialAlerts(commands.Cog):
         embed.set_footer(text="This is a test notification")
 
         await channel.send(embed=embed)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=EmbedFactory.success("Test Sent", f"Test notification sent to {channel.mention}"),
             ephemeral=True
         )

@@ -13,7 +13,10 @@ import random
 
 from utils.embeds import EmbedFactory, EmbedColor
 from utils.permissions import is_admin
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +29,46 @@ class Economy(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('economy', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
         self.currency_symbol = self.module_config.get('currency_symbol', '💎')
         self.currency_name = self.module_config.get('currency_name', 'ProgrammiCoin')
+
+    def _base_adjust_check(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_guild or perms.administrator or member == member.guild.owner
+
+    async def _can_adjust(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.ECONOMY_ADMIN_ADJUST, self._base_adjust_check)
+
+    async def _log_denial(self, interaction: discord.Interaction, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "economy", FeatureKey.ECONOMY_ADMIN_ADJUST.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{FeatureKey.ECONOMY_ADMIN_ADJUST.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send economy log to channel {channel} in {guild}")
 
     # NOTE: /balance command has been moved to games.py as PUBLIC command
 
@@ -217,7 +258,6 @@ class Economy(commands.Cog):
         user="User to add balance to",
         amount="Amount to add"
     )
-    @is_admin()
     async def add_balance_admin(
         self,
         interaction: discord.Interaction,
@@ -225,13 +265,30 @@ class Economy(commands.Cog):
         amount: int
     ):
         """Add balance to user (ADMIN ONLY)"""
+        if not await self._can_adjust(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to adjust balances."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, "addbalance")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        if amount == 0:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Invalid Amount", "Amount must be non-zero."),
+                ephemeral=True
+            )
+            return
+
         await self.db.add_balance(user.id, interaction.guild.id, amount)
 
         embed = EmbedFactory.success(
             "Balance Added",
             f"Added **{self.currency_symbol} {amount:,}** to {user.mention}"
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"{interaction.user} added {amount} to {user}")
 
 

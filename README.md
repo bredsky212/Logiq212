@@ -89,6 +89,7 @@ python main.py
 
 ### 🛡️ Advanced Moderation
 - **Warn system** - Track user warnings
+- **User reports** - Members can file `/report` with category, reason, and message link
 - **Timeout** - Temporary mutes
 - **Kick & Ban** - Standard moderation
 - **Auto-moderation** - Spam detection
@@ -97,6 +98,62 @@ python main.py
 - **Lock/Unlock** - Lock channels
 - **Nickname management** - Change nicknames
 - **Infraction tracking** - View all warnings
+
+### 📝 Staff Applications
+- **Apply panels** - Per-team panels with buttons + modals
+- **Custom templates** - Up to 5 fields per template (motivation, experience, etc.)
+- **Review workflow** - Pending/interview/accepted/rejected with buttons or commands
+- **Persistent views** - Panels/review buttons survive restarts
+- **DM notifications** - Applicants notified on submission and status changes
+- **Usage guide** - See `docs/staff_applications_guide.md` for setup and examples
+
+### 🛡️ Fine-Grained Permissions & VC Moderation
+- **Feature keys** - Allow/deny bot features per role without bypassing Discord perms
+- **/perms management** - Admin/Manage Guild can allow/deny/reset features
+- **VC suspension** - `/vcmod` commands for 2h/4h/12h timeouts with hierarchy checks
+- **Logging** - All actions reuse the existing moderation log channel
+- **Usage guide** - See `docs/permissions_vcmod_guide.md` for setup and examples
+
+### 🔐 Permissions & Roles (Feature Keys)
+- Configure with `/perms feature-*` (Admin/Manage Guild). Admin/owner always bypass feature restrictions (but not Discord perms).
+- Staff applications: `staffapp.template.manage`, `staffapp.review`; Tickets: `tickets.admin`, `tickets.close` (optional: `tickets.create`)
+- Moderation: `mod.warn`, `mod.warnings`, `mod.timeout`, `mod.kick`, `mod.ban`, `mod.clear`, `mod.slowmode`, `mod.lock`, `mod.nickname`; VC moderation: `mod.vc_suspend`, `mod.vc_unsuspend`
+- Verification & Games: `verify.config`, `games.panel.manage`
+- Roles & Economy: `roles.menu.manage`, `roles.force.assign`, `economy.admin.adjust`
+- Leveling & Giveaways: `leveling.admin.set`, `leveling.admin.reset`, `giveaway.create`, `giveaway.manage`
+- Music & Alerts: `music.dj.basic`, `music.dj.volume`, `alerts.manage`, `alerts.view`
+- Temp Voice, Utility, Analytics: `tempvoice.setup`, `tempvoice.owner.power`, `utility.poll`, `analytics.view`
+
+**Guild Security & Protected Roles**
+- Sensitive commands (ban/kick/timeout/lock/slowmode/VC suspend, tickets admin, staffapp template manage) are locked until an admin runs `/perms security-bootstrap` and confirms protected roles.
+- Protected roles (detected automatically: administrator/manage_guild) and the guild owner cannot be targeted by destructive actions or have roles assigned/removed by the bot.
+- Manage protected roles with `/perms security-protected-add|remove|list`; keep at least one protected role.
+
+## ⚙️ Config-Driven Modules
+- All cogs load by default. Add a `modules` block in `config.yaml` to selectively enable/disable cogs by file name:
+  ```yaml
+  modules:
+    tickets:
+      enabled: true
+    moderation:
+      enabled: true
+    report:
+      enabled: true
+    vcmod:
+      enabled: true
+    feature_permissions:
+      enabled: true
+    games:
+      enabled: false
+    music:
+      enabled: false
+  ```
+- Missing entries default to `enabled: true` for backward compatibility. Skipped cogs log as “Skipping cog <name> (disabled in config.modules)”.
+- See `config.minimal.example.yaml` for a moderation-only template (tickets, moderation/report, vcmod, perms, staff applications) with other cogs disabled.
+
+## 🧾 Logging Channels
+- Configure a default log channel with `/setlogchannel` (also seeds `log_channels.default`).
+- Use `/setlogchannel-advanced` to route specific events to dedicated channels: `reports`, `moderation`, `vcmod`, `tickets`, `feature_permissions` (fallback to `default` if unset).
 
 ### 🎁 Giveaway System
 - **Button-based entry** - Easy participation
@@ -196,6 +253,8 @@ ENVIRONMENT=production
 - `/rank [user]` - View rank card
 - `/balance [user]` - Check balance
 - `/leaderboard` - View server leaderboard
+- `/report <user> <category> <reason> [message_link]` - Report a user to moderators (guild-only)
+- `/staffapp apply` - Use Apply buttons posted by templates to submit staff applications (modal)
 
 ### 🔧 ADMIN COMMANDS (Administrators only)
 
@@ -284,6 +343,24 @@ ENVIRONMENT=production
 - `/reload <cog>` - Reload cog
 - `/sync` - Sync commands
 - `/setlogchannel <channel>` - Set log channel
+- `/perms feature-list` - View feature permission overrides
+- `/perms feature-allow|feature-deny|feature-clear|feature-reset` - Configure feature permissions
+
+#### VC Moderation
+- `/vcmod suspend <user> <duration> [reason]` - Timeout a user for 2h/4h/12h (ephemeral response, logged)
+- `/vcmod unsuspend <user> [reason]` - Remove timeout early
+- `/vcmod status <user>` - View current/last suspensions
+
+#### Staff Applications
+- `/staffapp config set-creator-role <role>` - Set creator role (admins only)
+- `/staffapp config add-reviewer-role <role>` - Add reviewer role
+- `/staffapp config remove-reviewer-role <role>` - Remove reviewer role
+- `/staffapp config show` - Show current staff app roles
+- `/staffapp template create ...` - Create a staff application template and post Apply panel
+- `/staffapp template list` - List templates
+- `/staffapp template enable|disable <template_id>` - Toggle template
+- `/staffapp queue [team_role] [status]` - List applications
+- `/staffapp set-status <application_id> <status> [notes]` - Update application status
 
 ### 🛡️ MODERATOR COMMANDS
 - `/warn <user> <reason>` - Warn user
@@ -297,6 +374,13 @@ ENVIRONMENT=production
 - `/lock [channel]` - Lock channel
 - `/unlock [channel]` - Unlock channel
 - `/nickname <user> [nickname]` - Change nickname
+
+## 📝 Reporting Users (/report)
+
+- Configure a moderation log channel once with `/setlogchannel <channel>` so reports notify staff.
+- Members can file `/report <user> <category> <reason> [message_link]` in a server (reason must be 10-512 characters; 60s per-user cooldown).
+- Optional message links are parsed and fetched when possible; the raw link is still stored if fetching fails.
+- Reports are stored in MongoDB (`reports` collection) and send an embed to the log channel when configured; reporters always get an ephemeral confirmation.
 
 ---
 

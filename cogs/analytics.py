@@ -11,8 +11,10 @@ from typing import Optional
 import logging
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,44 @@ class Analytics(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('analytics', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
+
+    def _base_analytics_check(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_guild or perms.view_audit_log or perms.administrator or member == member.guild.owner
+
+    async def _can_view(self, member: discord.Member) -> bool:
+        return await self.perms.check(member, FeatureKey.ANALYTICS_VIEW, self._base_analytics_check)
+
+    async def _log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "analytics", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send analytics log to channel {channel} in {guild}")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -65,9 +105,16 @@ class Analytics(commands.Cog):
 
     @app_commands.command(name="analytics", description="View server analytics")
     @app_commands.describe(days="Number of days to analyze (default: 7)")
-    @is_admin()
     async def analytics(self, interaction: discord.Interaction, days: int = 7):
         """View server analytics"""
+        if not await self._can_view(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to view analytics."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ANALYTICS_VIEW, "analytics")
+            return
+
         if days < 1 or days > 365:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Invalid Range", "Days must be between 1 and 365"),
@@ -139,9 +186,16 @@ class Analytics(commands.Cog):
         logger.info(f"Analytics generated for {interaction.guild}")
 
     @app_commands.command(name="activity", description="View recent server activity")
-    @is_admin()
     async def activity(self, interaction: discord.Interaction):
         """View recent activity"""
+        if not await self._can_view(interaction.user):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to view analytics."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.ANALYTICS_VIEW, "activity")
+            return
+
         # Get last 24 hours of activity
         end_time = datetime.utcnow().timestamp()
         start_time = (datetime.utcnow() - timedelta(hours=24)).timestamp()

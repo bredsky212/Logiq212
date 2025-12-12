@@ -15,7 +15,10 @@ import asyncio
 from utils.embeds import EmbedFactory, EmbedColor
 from utils.permissions import is_admin
 from utils.converters import TimeConverter
+from utils.feature_permissions import FeaturePermissionManager
+from utils.denials import DenialLogger
 from database.db_manager import DatabaseManager
+from database.models import FeatureKey
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +82,46 @@ class Giveaways(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('giveaways', {})
+        self.perms = bot.perms if hasattr(bot, "perms") else FeaturePermissionManager(db)
+        self.denials = DenialLogger()
         # Start giveaway checker
         self.giveaway_task = self.bot.loop.create_task(self.check_giveaways())
+
+    def _base_giveaway_manage(self, member: discord.Member) -> bool:
+        perms = member.guild_permissions
+        return perms.manage_guild or perms.manage_channels or perms.administrator or member == member.guild.owner
+
+    async def _can_use(self, member: discord.Member, feature: FeatureKey) -> bool:
+        return await self.perms.check(member, feature, self._base_giveaway_manage)
+
+    async def _log_denial(self, interaction: discord.Interaction, feature: FeatureKey, reason: str):
+        if interaction.guild is None:
+            return
+        if not self.denials.should_log(interaction.guild.id, interaction.user.id, "giveaways", feature.value):
+            return
+        embed = EmbedFactory.warning(
+            "Permission Denied",
+            f"{interaction.user.mention} denied `{feature.value}` in {interaction.guild.name}.\nReason: {reason}"
+        )
+        await self._log_to_mod(interaction.guild, embed)
+
+    async def _log_to_mod(self, guild: discord.Guild, embed: discord.Embed):
+        guild_config = await self.db.get_guild(guild.id)
+        if not guild_config:
+            return
+        log_channel_id = guild_config.get("log_channel")
+        if not log_channel_id:
+            return
+        channel = guild.get_channel(log_channel_id)
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send giveaway log to channel {channel} in {guild}")
 
     def cog_unload(self):
         """Cleanup on cog unload"""
@@ -174,7 +215,6 @@ class Giveaways(commands.Cog):
         duration="How long should the giveaway last? (e.g., 1h, 30m, 1d)",
         winners="Number of winners (default: 1)"
     )
-    @is_admin()
     async def start_giveaway(
         self,
         interaction: discord.Interaction,
@@ -183,8 +223,18 @@ class Giveaways(commands.Cog):
         winners: int = 1
     ):
         """Start a giveaway (ADMIN ONLY)"""
-        if winners < 1 or winners > 20:
+        if not await self._can_use(interaction.user, FeatureKey.GIVEAWAY_CREATE):
             await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to create giveaways."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.GIVEAWAY_CREATE, "giveaway")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        if winners < 1 or winners > 20:
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid Winners", "Winners must be between 1 and 20"),
                 ephemeral=True
             )
@@ -192,14 +242,14 @@ class Giveaways(commands.Cog):
 
         seconds = TimeConverter.parse(duration)
         if not seconds or seconds < 60:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid Duration", "Duration must be at least 1 minute (e.g., 1h, 30m, 1d)"),
                 ephemeral=True
             )
             return
 
         if seconds > 2592000:  # Max 30 days
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Duration Too Long", "Maximum giveaway duration is 30 days"),
                 ephemeral=True
             )
@@ -237,21 +287,30 @@ class Giveaways(commands.Cog):
         embed.timestamp = datetime.utcfromtimestamp(end_time)
 
         view = GiveawayView(giveaway_id, self)
-        
-        await interaction.response.send_message("🎉 Giveaway started!", ephemeral=True)
+
+        await interaction.followup.send("🎉 Giveaway started!", ephemeral=True)
         await interaction.channel.send(embed=embed, view=view)
 
         logger.info(f"{interaction.user} started giveaway in {interaction.guild}")
 
     @app_commands.command(name="gend", description="End a giveaway early (Admin)")
     @app_commands.describe(message_id="Message ID of the giveaway")
-    @is_admin()
     async def end_giveaway_early(self, interaction: discord.Interaction, message_id: str):
         """End a giveaway early (ADMIN ONLY)"""
+        if not await self._can_use(interaction.user, FeatureKey.GIVEAWAY_MANAGE):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to end giveaways."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.GIVEAWAY_MANAGE, "gend")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         try:
             msg_id = int(message_id)
         except ValueError:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid ID", "Please provide a valid message ID"),
                 ephemeral=True
             )
@@ -265,13 +324,13 @@ class Giveaways(commands.Cog):
         })
 
         if not giveaway:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Not Found", "No active giveaway found in this channel"),
                 ephemeral=True
             )
             return
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=EmbedFactory.success("Ending Giveaway", "Ending the giveaway now..."),
             ephemeral=True
         )
@@ -280,13 +339,22 @@ class Giveaways(commands.Cog):
 
     @app_commands.command(name="greroll", description="Reroll giveaway winners (Admin)")
     @app_commands.describe(message_id="Message ID of the giveaway")
-    @is_admin()
     async def reroll_giveaway(self, interaction: discord.Interaction, message_id: str):
         """Reroll giveaway winners (ADMIN ONLY)"""
+        if not await self._can_use(interaction.user, FeatureKey.GIVEAWAY_MANAGE):
+            await interaction.response.send_message(
+                embed=EmbedFactory.error("Permission Denied", "You do not have permission to reroll giveaways."),
+                ephemeral=True
+            )
+            await self._log_denial(interaction, FeatureKey.GIVEAWAY_MANAGE, "greroll")
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         try:
             msg_id = int(message_id)
         except ValueError:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid ID", "Please provide a valid message ID"),
                 ephemeral=True
             )
@@ -299,7 +367,7 @@ class Giveaways(commands.Cog):
         })
 
         if not giveaway:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("Not Found", "No ended giveaway found"),
                 ephemeral=True
             )
@@ -309,7 +377,7 @@ class Giveaways(commands.Cog):
         winners_count = giveaway.get('winners', 1)
 
         if len(participants) == 0:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=EmbedFactory.error("No Participants", "This giveaway had no participants"),
                 ephemeral=True
             )
@@ -326,7 +394,7 @@ class Giveaways(commands.Cog):
             "Congratulations! 🎊"
         )
 
-        await interaction.response.send_message(winner_mentions, embed=embed)
+        await interaction.followup.send(winner_mentions, embed=embed, ephemeral=True)
         logger.info(f"{interaction.user} rerolled giveaway in {interaction.guild}")
 
 
