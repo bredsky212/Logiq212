@@ -21,6 +21,7 @@
   - `/ticket-panel` posts publicly again (non-ephemeral).
   - Info commands (`/botinfo`, `/serverstats`) are admin-only, ephemeral by default with optional public flag.
   - `/timeout` now reports invalid user conversion errors ephemerally instead of silent failures.
+  - `/perms feature-list` filters by `config.yaml` `modules` enables by default; use `show_all: true` to include disabled modules.
 - Tests
   - Added `tests/test_security.py` covering protected member detection and sensitive feature gating (pytest required).
 

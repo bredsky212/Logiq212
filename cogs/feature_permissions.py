@@ -28,6 +28,48 @@ def _is_config_admin(member: discord.Member) -> bool:
     )
 
 
+def _is_cog_enabled(config: dict, cog_name: str) -> bool:
+    modules_cfg = (config or {}).get("modules") or {}
+    cog_cfg = modules_cfg.get(cog_name)
+
+    if cog_cfg is None:
+        return True  # default: enabled
+    if isinstance(cog_cfg, dict):
+        return bool(cog_cfg.get("enabled", True))
+    if isinstance(cog_cfg, bool):
+        return cog_cfg
+    return True
+
+
+_FEATURE_PREFIX_TO_COG = {
+    "tickets": "tickets",
+    "staffapp": "staff_applications",
+    "report": "moderation",
+    "perms": "feature_permissions",
+    "verify": "verification",
+    "games": "games",
+    "roles": "roles",
+    "economy": "economy",
+    "leveling": "leveling",
+    "giveaway": "giveaways",
+    "music": "music",
+    "alerts": "social_alerts",
+    "tempvoice": "temp_voice",
+    "utility": "utility",
+    "analytics": "analytics",
+}
+
+
+def _feature_to_cog_name(feature: FeatureKey) -> Optional[str]:
+    value = feature.value
+    if value.startswith("mod.vc_"):
+        return "vcmod"
+    if value.startswith("mod."):
+        return "moderation"
+    prefix = value.split(".", 1)[0]
+    return _FEATURE_PREFIX_TO_COG.get(prefix)
+
+
 class FeaturePermissions(commands.Cog):
     """Configure feature-level permissions"""
 
@@ -74,7 +116,8 @@ class FeaturePermissions(commands.Cog):
         return await self.db.get_feature_permission(guild_id, feature_key) or {}
 
     @perms.command(name="feature-list", description="List feature permission overrides")
-    async def feature_list(self, interaction: discord.Interaction):
+    @app_commands.describe(show_all="Show all feature keys (including disabled modules)")
+    async def feature_list(self, interaction: discord.Interaction, show_all: bool = False):
         if not interaction.response.is_done():
             try:
                 await interaction.response.defer(ephemeral=True, thinking=True)
@@ -91,7 +134,12 @@ class FeaturePermissions(commands.Cog):
 
         docs = {doc["feature_key"]: doc for doc in await self.db.list_feature_permissions(interaction.guild.id)}
         lines = []
+        config = getattr(self.bot, "config", {}) or {}
         for key in FeatureKey:
+            if not show_all:
+                cog_name = _feature_to_cog_name(key)
+                if cog_name and not _is_cog_enabled(config, cog_name):
+                    continue
             doc = docs.get(key.value)
             if not doc:
                 lines.append(f"**{key.value}** - default (no overrides)")
