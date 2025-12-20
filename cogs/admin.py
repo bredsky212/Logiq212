@@ -26,36 +26,6 @@ class Admin(commands.Cog):
         self.db = db
         self.config = config
 
-    @app_commands.command(name="reload", description="Reload a cog")
-    @app_commands.describe(cog="Name of the cog to reload")
-    @is_admin()
-    async def reload(self, interaction: discord.Interaction, cog: str):
-        """Reload a cog"""
-        try:
-            await self.bot.reload_extension(f"cogs.{cog}")
-            embed = EmbedFactory.success(
-                "Cog Reloaded",
-                f"Successfully reloaded **{cog}**"
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            logger.info(f"{interaction.user} reloaded cog {cog}")
-        except commands.ExtensionNotLoaded:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Error", f"Cog **{cog}** is not loaded"),
-                ephemeral=True
-            )
-        except commands.ExtensionNotFound:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Error", f"Cog **{cog}** not found"),
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Error", f"Failed to reload: {str(e)}"),
-                ephemeral=True
-            )
-            logger.error(f"Error reloading cog {cog}: {e}", exc_info=True)
-
     @app_commands.command(name="sync", description="Sync slash commands")
     @is_admin()
     async def sync(self, interaction: discord.Interaction):
@@ -218,32 +188,6 @@ class Admin(commands.Cog):
         )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="purge", description="Delete messages in bulk")
-    @app_commands.describe(amount="Number of messages to delete (1-100)")
-    @is_admin()
-    async def purge(self, interaction: discord.Interaction, amount: int):
-        """Purge messages"""
-        if amount < 1 or amount > 100:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Invalid Amount", "Amount must be between 1 and 100"),
-                ephemeral=True
-            )
-            return
-
-        try:
-            deleted = await interaction.channel.purge(limit=amount)
-            embed = EmbedFactory.success(
-                "Messages Purged",
-                f"Deleted **{len(deleted)}** messages"
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True, delete_after=5)
-            logger.info(f"{interaction.user} purged {len(deleted)} messages in {interaction.channel}")
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Error", "I don't have permission to delete messages"),
-                ephemeral=True
-            )
 
 
 async def setup(bot: commands.Bot):
