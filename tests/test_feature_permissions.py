@@ -90,6 +90,42 @@ async def test_allowed_and_denied_roles():
     assert not await mgr.check(member_denied, FeatureKey.MOD_TIMEOUT, base_check=lambda m: True)
 
 
+@pytest.mark.asyncio
+async def test_require_allowlist_blocks_without_doc():
+    db = FakeDB()
+    mgr = FeaturePermissionManager(db)
+    guild = DummyGuild(owner=None)
+    member = DummyMember(guild, [], DummyPerms())
+
+    allowed = await mgr.check(
+        member,
+        FeatureKey.AI_USE,
+        base_check=lambda m: True,
+        allow_admin=False,
+        require_allowlist=True,
+    )
+    assert not allowed
+
+
+@pytest.mark.asyncio
+async def test_require_allowlist_allows_with_role():
+    db = FakeDB()
+    mgr = FeaturePermissionManager(db)
+    guild = DummyGuild(owner=None)
+    role_allowed = DummyRole(1)
+    member = DummyMember(guild, [role_allowed], DummyPerms())
+
+    await db.add_doc(guild_id=123, feature_key=FeatureKey.AI_USE.value, allowed=[1], denied=[])
+
+    allowed = await mgr.check(
+        member,
+        FeatureKey.AI_USE,
+        base_check=lambda m: True,
+        allow_admin=False,
+        require_allowlist=True,
+    )
+    assert allowed
+
 def test_denial_logger_throttles():
     dl = DenialLogger(window_seconds=1)
     assert dl.should_log(1, 2, "cmd", "feature")
