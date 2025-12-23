@@ -5,9 +5,19 @@ Defines structure for database documents
 
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from datetime import datetime
+
+AI_DEFAULT_MODEL_ID = "z-ai/glm-4.5-air:free"
+AI_DEFAULT_MODE = "fast"
+AI_DEFAULT_USER_COOLDOWN_SECONDS = 15
+AI_DEFAULT_CHANNEL_COOLDOWN_SECONDS = 5
+AI_DEFAULT_MAX_CONCURRENT = 3
+AI_DEFAULT_SESSION_MAX_TURNS = 12
+AI_SESSION_TTL_SECONDS = 86400
+AI_DEFAULT_MODEL_ALLOWLIST = [AI_DEFAULT_MODEL_ID]
+AI_DEFAULT_RPM_LIMIT = 20
+AI_DEFAULT_RPD_LIMIT = 50
 
 
 @dataclass
@@ -211,6 +221,132 @@ class AnalyticsEvent:
             "guild_id": self.guild_id,
             "timestamp": self.timestamp,
             **self.data
+        }
+
+
+@dataclass
+class AIGuildSettings:
+    """Per-guild AI configuration"""
+    guild_id: int
+    enabled: bool = False
+    allowed_channel_ids: List[int] = field(default_factory=list)
+    default_model_id: str = AI_DEFAULT_MODEL_ID
+    default_mode: str = AI_DEFAULT_MODE
+    user_cooldown_seconds: int = AI_DEFAULT_USER_COOLDOWN_SECONDS
+    channel_cooldown_seconds: int = AI_DEFAULT_CHANNEL_COOLDOWN_SECONDS
+    max_concurrent: int = AI_DEFAULT_MAX_CONCURRENT
+    session_max_turns: int = AI_DEFAULT_SESSION_MAX_TURNS
+    session_ttl_seconds: int = AI_SESSION_TTL_SECONDS
+    model_allowlist: List[str] = field(default_factory=lambda: list(AI_DEFAULT_MODEL_ALLOWLIST))
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            "guild_id": self.guild_id,
+            "enabled": self.enabled,
+            "allowed_channel_ids": self.allowed_channel_ids,
+            "default_model_id": self.default_model_id,
+            "default_mode": self.default_mode,
+            "user_cooldown_seconds": self.user_cooldown_seconds,
+            "channel_cooldown_seconds": self.channel_cooldown_seconds,
+            "max_concurrent": self.max_concurrent,
+            "session_max_turns": self.session_max_turns,
+            "session_ttl_seconds": self.session_ttl_seconds,
+            "model_allowlist": self.model_allowlist,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class AIApiKey:
+    """Stored OpenRouter API key metadata"""
+    guild_id: int
+    name: str
+    encrypted_api_key: Dict[str, str]
+    key_fingerprint: str
+    rpm_limit: int = AI_DEFAULT_RPM_LIMIT
+    rpd_limit: int = AI_DEFAULT_RPD_LIMIT
+    enabled: bool = True
+    notes: Optional[str] = None
+    cooldown_until: Optional[datetime] = None
+    last_error_code: Optional[int] = None
+    last_error: Optional[str] = None
+    last_error_at: Optional[datetime] = None
+    minute_window_count: int = 0
+    minute_window_started_at: Optional[datetime] = None
+    day_count: int = 0
+    day_started_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    openrouter_info: Optional[Dict[str, Any]] = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            "guild_id": self.guild_id,
+            "name": self.name,
+            "encrypted_api_key": self.encrypted_api_key,
+            "key_fingerprint": self.key_fingerprint,
+            "rpm_limit": self.rpm_limit,
+            "rpd_limit": self.rpd_limit,
+            "enabled": self.enabled,
+            "notes": self.notes,
+            "cooldown_until": self.cooldown_until,
+            "last_error_code": self.last_error_code,
+            "last_error": self.last_error,
+            "last_error_at": self.last_error_at,
+            "minute_window_count": self.minute_window_count,
+            "minute_window_started_at": self.minute_window_started_at,
+            "day_count": self.day_count,
+            "day_started_at": self.day_started_at,
+            "last_used_at": self.last_used_at,
+            "openrouter_info": self.openrouter_info,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class AISessionMessage:
+    """Stored AI chat message"""
+    role: str
+    content: str
+    ts: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            "role": self.role,
+            "content": self.content,
+            "ts": self.ts,
+        }
+
+
+@dataclass
+class AISession:
+    """AI chat session with short-lived context"""
+    guild_id: int
+    user_id: int
+    channel_id: int
+    messages: List[AISessionMessage] = field(default_factory=list)
+    active: bool = False
+    private_default: bool = True
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            "guild_id": self.guild_id,
+            "user_id": self.user_id,
+            "channel_id": self.channel_id,
+            "messages": [m.to_dict() for m in self.messages],
+            "active": self.active,
+            "private_default": self.private_default,
+            "updated_at": self.updated_at,
         }
 
 
@@ -447,6 +583,11 @@ class FeatureKey(str, Enum):
 
     # Analytics
     ANALYTICS_VIEW = "analytics.view"
+
+    # AI
+    AI_USE = "ai.use"
+    AI_ADMIN = "ai.admin"
+    AI_MENTION_REPLY = "ai.mention_reply"
 
 
 @dataclass

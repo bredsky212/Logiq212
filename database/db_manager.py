@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 import logging
 from bson import ObjectId
+from database.models import AI_SESSION_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,21 @@ class DatabaseManager:
         """Access guild security collection"""
         return self.db.guild_security if self.db is not None else None
 
+    @property
+    def ai_guild_settings(self):
+        """Access AI guild settings collection"""
+        return self.db.ai_guild_settings if self.db is not None else None
+
+    @property
+    def ai_api_keys(self):
+        """Access AI API keys collection"""
+        return self.db.ai_api_keys if self.db is not None else None
+
+    @property
+    def ai_sessions(self):
+        """Access AI sessions collection"""
+        return self.db.ai_sessions if self.db is not None else None
+
     async def _ensure_indexes(self) -> None:
         """Ensure required indexes are present"""
         if self.db is None:
@@ -125,6 +141,12 @@ class DatabaseManager:
             await self.db.suspensions.create_index([("guild_id", 1), ("user_id", 1), ("active", 1)])
             await self.db.suspensions.create_index([("guild_id", 1), ("ends_at", 1)])
             await self.db.guild_security.create_index([("guild_id", 1)], unique=True)
+            await self.db.ai_guild_settings.create_index([("guild_id", 1)], unique=True)
+            await self.db.ai_api_keys.create_index([("guild_id", 1), ("name", 1)], unique=True)
+            await self.db.ai_api_keys.create_index([("guild_id", 1), ("enabled", 1)])
+            await self.db.ai_sessions.create_index([("guild_id", 1), ("user_id", 1), ("channel_id", 1)], unique=True)
+            await self.db.ai_sessions.create_index([("guild_id", 1), ("user_id", 1), ("active", 1)])
+            await self.db.ai_sessions.create_index([("updated_at", 1)], expireAfterSeconds=AI_SESSION_TTL_SECONDS)
         except Exception as e:
             logger.warning(f"Failed to ensure database indexes: {e}")
 
@@ -403,6 +425,109 @@ class DatabaseManager:
             upsert=True,
         )
         return await self.get_guild_security(guild_id)
+
+    # AI settings operations
+    async def get_ai_guild_settings(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        """Get AI settings for a guild."""
+        if self.ai_guild_settings is None:
+            return None
+        return await self.ai_guild_settings.find_one({"guild_id": guild_id})
+
+    async def upsert_ai_guild_settings(self, guild_id: int, update: Dict[str, Any]) -> Dict[str, Any]:
+        """Upsert AI settings for a guild."""
+        if self.ai_guild_settings is None:
+            raise RuntimeError("ai_guild_settings collection not available")
+        payload = {"guild_id": guild_id, **update}
+        payload["updated_at"] = update.get("updated_at", datetime.utcnow())
+        payload.setdefault("created_at", datetime.utcnow())
+        await self.ai_guild_settings.update_one(
+            {"guild_id": guild_id},
+            {"$set": payload},
+            upsert=True
+        )
+        return await self.get_ai_guild_settings(guild_id)
+
+    # AI API key operations
+    async def create_ai_api_key(self, data: Dict[str, Any]) -> str:
+        """Create an AI API key record."""
+        if self.ai_api_keys is None:
+            raise RuntimeError("ai_api_keys collection not available")
+        result = await self.ai_api_keys.insert_one(data)
+        return str(result.inserted_id)
+
+    async def get_ai_api_key(self, guild_id: int, name: str) -> Optional[Dict[str, Any]]:
+        """Get a single AI API key by name."""
+        if self.ai_api_keys is None:
+            return None
+        return await self.ai_api_keys.find_one({"guild_id": guild_id, "name": name})
+
+    async def list_ai_api_keys(self, guild_id: int) -> List[Dict[str, Any]]:
+        """List AI API keys for a guild."""
+        if self.ai_api_keys is None:
+            return []
+        cursor = self.ai_api_keys.find({"guild_id": guild_id}).sort("name", 1)
+        return await cursor.to_list(length=200)
+
+    async def update_ai_api_key(self, guild_id: int, name: str, update: Dict[str, Any]) -> bool:
+        """Update AI API key metadata."""
+        if self.ai_api_keys is None:
+            raise RuntimeError("ai_api_keys collection not available")
+        result = await self.ai_api_keys.update_one(
+            {"guild_id": guild_id, "name": name},
+            {"$set": update}
+        )
+        return result.modified_count > 0
+
+    async def delete_ai_api_key(self, guild_id: int, name: str) -> bool:
+        """Delete an AI API key record."""
+        if self.ai_api_keys is None:
+            raise RuntimeError("ai_api_keys collection not available")
+        result = await self.ai_api_keys.delete_one({"guild_id": guild_id, "name": name})
+        return result.deleted_count > 0
+
+    # AI session operations
+    async def get_ai_session(self, guild_id: int, user_id: int, channel_id: int) -> Optional[Dict[str, Any]]:
+        """Get AI session for a user in a channel."""
+        if self.ai_sessions is None:
+            return None
+        return await self.ai_sessions.find_one(
+            {"guild_id": guild_id, "user_id": user_id, "channel_id": channel_id}
+        )
+
+    async def upsert_ai_session(
+        self,
+        guild_id: int,
+        user_id: int,
+        channel_id: int,
+        update: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Upsert AI session for a user in a channel."""
+        if self.ai_sessions is None:
+            raise RuntimeError("ai_sessions collection not available")
+        payload = {"guild_id": guild_id, "user_id": user_id, "channel_id": channel_id, **update}
+        await self.ai_sessions.update_one(
+            {"guild_id": guild_id, "user_id": user_id, "channel_id": channel_id},
+            {"$set": payload},
+            upsert=True
+        )
+        return await self.get_ai_session(guild_id, user_id, channel_id)
+
+    async def delete_ai_session(self, guild_id: int, user_id: int, channel_id: int) -> bool:
+        """Delete AI session for a user in a channel."""
+        if self.ai_sessions is None:
+            raise RuntimeError("ai_sessions collection not available")
+        result = await self.ai_sessions.delete_one(
+            {"guild_id": guild_id, "user_id": user_id, "channel_id": channel_id}
+        )
+        return result.deleted_count > 0
+
+    async def get_active_ai_session(self, guild_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get active AI session for a user in a guild."""
+        if self.ai_sessions is None:
+            return None
+        return await self.ai_sessions.find_one(
+            {"guild_id": guild_id, "user_id": user_id, "active": True}
+        )
 
     # Suspension operations
     async def create_suspension(self, data: Dict[str, Any]) -> str:

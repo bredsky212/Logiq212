@@ -57,6 +57,7 @@ _FEATURE_PREFIX_TO_COG = {
     "tempvoice": "temp_voice",
     "utility": "utility",
     "analytics": "analytics",
+    "ai": "ai_chat",
 }
 
 

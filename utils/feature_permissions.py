@@ -46,23 +46,25 @@ class FeaturePermissionManager:
         member: discord.Member,
         feature_key: FeatureKey,
         base_check: Callable[[discord.Member], bool],
+        allow_admin: bool = True,
+        require_allowlist: bool = False,
     ) -> bool:
         """
         Evaluate whether a member can use a feature.
 
         Rules:
-        1) Owner/Admin always allowed.
+        1) Owner/Admin always allowed (unless allow_admin is False).
         2) Base check must pass (Discord perms, local logic).
         3) Sensitive features require security bootstrap to be initialized.
-        4) If no feature doc -> allow.
+        4) If no feature doc -> allow (unless require_allowlist is True).
         5) Deny if member has any denied role.
-        6) If allowed_roles empty -> allow.
+        6) If allowed_roles empty -> allow (unless require_allowlist is True).
         7) Else require at least one allowed role.
         """
         if member.guild is None:
             return False
 
-        if member.guild_permissions.administrator or member == member.guild.owner:
+        if allow_admin and (member.guild_permissions.administrator or member == member.guild.owner):
             return True
 
         if not base_check(member):
@@ -83,7 +85,7 @@ class FeaturePermissionManager:
 
         doc = await self.db.get_feature_permission(member.guild.id, feature_key.value)
         if not doc:
-            return True
+            return not require_allowlist
 
         member_role_ids = {r.id for r in member.roles}
 
@@ -93,7 +95,7 @@ class FeaturePermissionManager:
 
         allowed_roles = set(doc.get("allowed_roles", []))
         if not allowed_roles:
-            return True
+            return not require_allowlist
 
         return bool(member_role_ids.intersection(allowed_roles))
 
