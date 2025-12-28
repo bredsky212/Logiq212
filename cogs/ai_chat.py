@@ -556,7 +556,11 @@ class AIChat(commands.Cog):
         user_prompt: str,
     ) -> List[Dict[str, str]]:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages.extend(session_messages)
+        for msg in session_messages:
+            role = msg.get("role")
+            content = msg.get("content")
+            if role and content:
+                messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": user_prompt})
         return messages
 
