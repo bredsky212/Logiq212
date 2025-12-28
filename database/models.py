@@ -18,6 +18,9 @@ AI_SESSION_TTL_SECONDS = 86400
 AI_DEFAULT_MODEL_ALLOWLIST = [AI_DEFAULT_MODEL_ID]
 AI_DEFAULT_RPM_LIMIT = 20
 AI_DEFAULT_RPD_LIMIT = 50
+AI_DEFAULT_PROVIDER_ALLOWLIST: List[str] = []
+AI_DEFAULT_PROVIDER_DENYLIST: List[str] = []
+AI_DEFAULT_PROVIDER_ORDER: List[str] = []
 
 
 @dataclass
@@ -238,6 +241,9 @@ class AIGuildSettings:
     session_max_turns: int = AI_DEFAULT_SESSION_MAX_TURNS
     session_ttl_seconds: int = AI_SESSION_TTL_SECONDS
     model_allowlist: List[str] = field(default_factory=lambda: list(AI_DEFAULT_MODEL_ALLOWLIST))
+    provider_allowlist: List[str] = field(default_factory=list)
+    provider_denylist: List[str] = field(default_factory=list)
+    provider_order: List[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -255,6 +261,9 @@ class AIGuildSettings:
             "session_max_turns": self.session_max_turns,
             "session_ttl_seconds": self.session_ttl_seconds,
             "model_allowlist": self.model_allowlist,
+            "provider_allowlist": self.provider_allowlist,
+            "provider_denylist": self.provider_denylist,
+            "provider_order": self.provider_order,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

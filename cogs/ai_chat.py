@@ -26,6 +26,9 @@ from database.models import (
     AI_DEFAULT_RPM_LIMIT,
     AI_DEFAULT_SESSION_MAX_TURNS,
     AI_DEFAULT_USER_COOLDOWN_SECONDS,
+    AI_DEFAULT_PROVIDER_ALLOWLIST,
+    AI_DEFAULT_PROVIDER_DENYLIST,
+    AI_DEFAULT_PROVIDER_ORDER,
     FeatureKey,
     AIGuildSettings,
 )
@@ -150,6 +153,9 @@ class AIChat(commands.Cog):
             "session_max_turns",
             "session_ttl_seconds",
             "model_allowlist",
+            "provider_allowlist",
+            "provider_denylist",
+            "provider_order",
         ):
             if key not in doc:
                 update[key] = defaults[key]
@@ -158,6 +164,16 @@ class AIChat(commands.Cog):
         if not doc.get("model_allowlist"):
             update["model_allowlist"] = list(AI_DEFAULT_MODEL_ALLOWLIST)
             doc["model_allowlist"] = list(AI_DEFAULT_MODEL_ALLOWLIST)
+
+        if "provider_allowlist" not in doc:
+            update["provider_allowlist"] = list(AI_DEFAULT_PROVIDER_ALLOWLIST)
+            doc["provider_allowlist"] = list(AI_DEFAULT_PROVIDER_ALLOWLIST)
+        if "provider_denylist" not in doc:
+            update["provider_denylist"] = list(AI_DEFAULT_PROVIDER_DENYLIST)
+            doc["provider_denylist"] = list(AI_DEFAULT_PROVIDER_DENYLIST)
+        if "provider_order" not in doc:
+            update["provider_order"] = list(AI_DEFAULT_PROVIDER_ORDER)
+            doc["provider_order"] = list(AI_DEFAULT_PROVIDER_ORDER)
 
         if doc.get("default_model_id") and doc["default_model_id"] not in doc["model_allowlist"]:
             allowlist = list(doc["model_allowlist"])
@@ -347,7 +363,7 @@ class AIChat(commands.Cog):
         except discord.Forbidden:
             logger.warning("Cannot send AI log to channel %s in guild %s", channel, guild.id)
 
-    async def _call_openrouter(self, guild_id: int, payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    async def _call_openrouter(self, guild_id: int, payload: Dict[str, Any], mode: str) -> Tuple[Optional[str], Optional[str]]:
         candidates = await self._select_key_candidates(guild_id)
         if not candidates:
             return None, "No available AI keys. Ask an admin to add or enable keys."
@@ -412,12 +428,15 @@ class AIChat(commands.Cog):
                     error_meta = {}
 
             logger.warning(
-                "OpenRouter error status=%s key=%s message=%s request_id=%s meta=%s",
+                "OpenRouter error status=%s key=%s message=%s request_id=%s meta=%s model=%s mode=%s provider=%s",
                 status,
                 doc.get("name"),
                 error_message,
                 request_id,
                 error_meta,
+                payload.get("model"),
+                mode,
+                payload.get("provider"),
             )
 
             if status == 429:
@@ -477,6 +496,9 @@ class AIChat(commands.Cog):
             chunks.append(text[start:start + limit])
             start += limit
         return chunks
+
+    def _parse_comma_list(self, value: str) -> List[str]:
+        return [item.strip() for item in value.split(",") if item.strip()]
 
     async def _send_ai_response(
         self,
@@ -564,6 +586,19 @@ class AIChat(commands.Cog):
                 ephemeral=True,
             )
         return allowed
+
+    async def _get_any_api_key(self, guild_id: int) -> Tuple[Optional[str], Optional[str]]:
+        keys = await self.db.list_ai_api_keys(guild_id)
+        for key_doc in keys:
+            if not key_doc.get("enabled", True):
+                continue
+            try:
+                return decrypt_api_key(key_doc["encrypted_api_key"]), None
+            except ValueError as exc:
+                return None, str(exc)
+            except Exception:
+                continue
+        return None, "No enabled AI keys available."
 
     async def _build_prompt(
         self,
@@ -705,10 +740,22 @@ class AIChat(commands.Cog):
                 "max_tokens": max_tokens,
                 "temperature": temperature,
             }
+            provider_cfg = {}
+            provider_allow = settings.get("provider_allowlist", [])
+            provider_deny = settings.get("provider_denylist", [])
+            provider_order = settings.get("provider_order", [])
+            if provider_allow:
+                provider_cfg["allow"] = provider_allow
+            if provider_deny:
+                provider_cfg["deny"] = provider_deny
+            if provider_order:
+                provider_cfg["order"] = provider_order
+            if provider_cfg:
+                payload["provider"] = provider_cfg
             if request_mode == "think":
                 payload["reasoning"] = {"effort": "high"}
 
-            response_text, error = await self._call_openrouter(guild.id, payload)
+            response_text, error = await self._call_openrouter(guild.id, payload, request_mode)
             if error or not response_text:
                 await interaction.followup.send(
                     embed=EmbedFactory.error("AI Error", error or "Failed to get AI response."),
@@ -1352,6 +1399,217 @@ class AIChat(commands.Cog):
             embed=EmbedFactory.success("Model Updated", f"Default model set to `{model_id}`."),
             ephemeral=True,
         )
+
+    @ai_admin.command(name="provider-allow-add", description="Allow an OpenRouter provider.")
+    async def ai_admin_provider_allow_add(self, interaction: discord.Interaction, provider: str) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._validate_ai_admin(interaction):
+            return
+        providers = self._parse_comma_list(provider)
+        if not providers:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Invalid Provider", "Provide at least one provider name."),
+                ephemeral=True,
+            )
+            return
+        settings = await self._get_guild_settings(interaction.guild.id)
+        allowlist = set(settings.get("provider_allowlist", []))
+        allowlist.update(providers)
+        updated = await self.db.upsert_ai_guild_settings(
+            interaction.guild.id,
+            {"provider_allowlist": list(allowlist), "updated_at": self._now()},
+        )
+        await interaction.followup.send(
+            embed=EmbedFactory.success(
+                "Provider Allowed",
+                f"Allowlist: {', '.join(updated.get('provider_allowlist', [])) or 'None'}",
+            ),
+            ephemeral=True,
+        )
+
+    @ai_admin.command(name="provider-allow-remove", description="Remove an OpenRouter provider from allowlist.")
+    async def ai_admin_provider_allow_remove(self, interaction: discord.Interaction, provider: str) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._validate_ai_admin(interaction):
+            return
+        providers = self._parse_comma_list(provider)
+        settings = await self._get_guild_settings(interaction.guild.id)
+        allowlist = set(settings.get("provider_allowlist", []))
+        for item in providers:
+            allowlist.discard(item)
+        updated = await self.db.upsert_ai_guild_settings(
+            interaction.guild.id,
+            {"provider_allowlist": list(allowlist), "updated_at": self._now()},
+        )
+        await interaction.followup.send(
+            embed=EmbedFactory.success(
+                "Provider Removed",
+                f"Allowlist: {', '.join(updated.get('provider_allowlist', [])) or 'None'}",
+            ),
+            ephemeral=True,
+        )
+
+    @ai_admin.command(name="provider-deny-add", description="Deny an OpenRouter provider.")
+    async def ai_admin_provider_deny_add(self, interaction: discord.Interaction, provider: str) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._validate_ai_admin(interaction):
+            return
+        providers = self._parse_comma_list(provider)
+        if not providers:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Invalid Provider", "Provide at least one provider name."),
+                ephemeral=True,
+            )
+            return
+        settings = await self._get_guild_settings(interaction.guild.id)
+        denylist = set(settings.get("provider_denylist", []))
+        denylist.update(providers)
+        updated = await self.db.upsert_ai_guild_settings(
+            interaction.guild.id,
+            {"provider_denylist": list(denylist), "updated_at": self._now()},
+        )
+        await interaction.followup.send(
+            embed=EmbedFactory.success(
+                "Provider Denied",
+                f"Denylist: {', '.join(updated.get('provider_denylist', [])) or 'None'}",
+            ),
+            ephemeral=True,
+        )
+
+    @ai_admin.command(name="provider-deny-remove", description="Remove an OpenRouter provider from denylist.")
+    async def ai_admin_provider_deny_remove(self, interaction: discord.Interaction, provider: str) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._validate_ai_admin(interaction):
+            return
+        providers = self._parse_comma_list(provider)
+        settings = await self._get_guild_settings(interaction.guild.id)
+        denylist = set(settings.get("provider_denylist", []))
+        for item in providers:
+            denylist.discard(item)
+        updated = await self.db.upsert_ai_guild_settings(
+            interaction.guild.id,
+            {"provider_denylist": list(denylist), "updated_at": self._now()},
+        )
+        await interaction.followup.send(
+            embed=EmbedFactory.success(
+                "Provider Removed",
+                f"Denylist: {', '.join(updated.get('provider_denylist', [])) or 'None'}",
+            ),
+            ephemeral=True,
+        )
+
+    @ai_admin.command(name="provider-order-set", description="Set OpenRouter provider order.")
+    @app_commands.describe(providers="Comma-separated provider names")
+    async def ai_admin_provider_order_set(self, interaction: discord.Interaction, providers: str) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._validate_ai_admin(interaction):
+            return
+        order = self._parse_comma_list(providers)
+        if not order:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Invalid Providers", "Provide at least one provider name."),
+                ephemeral=True,
+            )
+            return
+        updated = await self.db.upsert_ai_guild_settings(
+            interaction.guild.id,
+            {"provider_order": order, "updated_at": self._now()},
+        )
+        await interaction.followup.send(
+            embed=EmbedFactory.success(
+                "Provider Order Set",
+                f"Order: {', '.join(updated.get('provider_order', [])) or 'None'}",
+            ),
+            ephemeral=True,
+        )
+
+    @ai_admin.command(name="provider-order-clear", description="Clear OpenRouter provider order.")
+    async def ai_admin_provider_order_clear(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._validate_ai_admin(interaction):
+            return
+        updated = await self.db.upsert_ai_guild_settings(
+            interaction.guild.id,
+            {"provider_order": [], "updated_at": self._now()},
+        )
+        await interaction.followup.send(
+            embed=EmbedFactory.success(
+                "Provider Order Cleared",
+                f"Order: {', '.join(updated.get('provider_order', [])) or 'None'}",
+            ),
+            ephemeral=True,
+        )
+
+    @ai_admin.command(name="provider-config", description="Show current provider routing settings.")
+    async def ai_admin_provider_config(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._validate_ai_admin(interaction):
+            return
+        settings = await self._get_guild_settings(interaction.guild.id)
+        allowlist = ", ".join(settings.get("provider_allowlist", [])) or "None"
+        denylist = ", ".join(settings.get("provider_denylist", [])) or "None"
+        order = ", ".join(settings.get("provider_order", [])) or "None"
+        embed = EmbedFactory.create(
+            title="Provider Routing",
+            description=f"Allowlist: {allowlist}\nDenylist: {denylist}\nOrder: {order}",
+            color=EmbedColor.INFO,
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @ai_admin.command(name="models-list", description="List OpenRouter models.")
+    @app_commands.describe(filter="Optional substring filter")
+    async def ai_admin_models_list(self, interaction: discord.Interaction, filter: Optional[str] = None) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._validate_ai_admin(interaction):
+            return
+        api_key, error = await self._get_any_api_key(interaction.guild.id)
+        if not api_key:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("No Key", error or "No enabled AI keys available."),
+                ephemeral=True,
+            )
+            return
+        try:
+            status, data, text, _headers = await request_json("GET", "/models", api_key)
+        except Exception as exc:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Models List Failed", f"OpenRouter request failed: {exc}"),
+                ephemeral=True,
+            )
+            return
+        if status != 200 or not isinstance(data, dict):
+            message = text[:MAX_STATUS_TEXT] if text else "Failed to fetch models."
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Models List Failed", message),
+                ephemeral=True,
+            )
+            return
+        models = data.get("data", [])
+        if not isinstance(models, list):
+            models = []
+        match = (filter or "").lower()
+        filtered = []
+        for item in models:
+            model_id = item.get("id") if isinstance(item, dict) else None
+            if not model_id:
+                continue
+            if match and match not in model_id.lower():
+                continue
+            filtered.append(model_id)
+            if len(filtered) >= 25:
+                break
+        if not filtered:
+            await interaction.followup.send(
+                embed=EmbedFactory.info("Models", "No models matched your filter."),
+                ephemeral=True,
+            )
+            return
+        embed = EmbedFactory.create(
+            title="OpenRouter Models",
+            description="\n".join(f"`{model_id}`" for model_id in filtered),
+            color=EmbedColor.INFO,
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="ask", description="Deprecated: use /ai ask")
     @app_commands.describe(question="Your question for the AI")
