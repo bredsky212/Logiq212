@@ -404,6 +404,13 @@ class AIChat(commands.Cog):
             if not error_message:
                 error_message = text[:MAX_STATUS_TEXT] if text else "OpenRouter error"
 
+            logger.warning(
+                "OpenRouter error status=%s key=%s message=%s",
+                status,
+                doc.get("name"),
+                error_message,
+            )
+
             if status == 429:
                 retry_after = headers.get("Retry-After")
                 cooldown = DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
