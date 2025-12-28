@@ -924,7 +924,7 @@ class AIChat(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         if not await self._validate_ai_admin(interaction):
             return
-        if not isinstance(channel, (discord.TextChannel, discord.NewsChannel, discord.ForumChannel)):
+        if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
             await interaction.followup.send(
                 embed=EmbedFactory.error("Invalid Channel", "Only text or forum channels can be allowlisted."),
                 ephemeral=True,
