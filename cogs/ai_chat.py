@@ -404,11 +404,20 @@ class AIChat(commands.Cog):
             if not error_message:
                 error_message = text[:MAX_STATUS_TEXT] if text else "OpenRouter error"
 
+            request_id = headers.get("x-request-id") or headers.get("X-Request-Id")
+            error_meta = {}
+            if isinstance(data, dict):
+                error_meta = data.get("error") or {}
+                if not isinstance(error_meta, dict):
+                    error_meta = {}
+
             logger.warning(
-                "OpenRouter error status=%s key=%s message=%s",
+                "OpenRouter error status=%s key=%s message=%s request_id=%s meta=%s",
                 status,
                 doc.get("name"),
                 error_message,
+                request_id,
+                error_meta,
             )
 
             if status == 429:
