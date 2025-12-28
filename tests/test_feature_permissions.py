@@ -26,8 +26,9 @@ class DummyRole:
 
 
 class DummyGuild:
-    def __init__(self, owner):
+    def __init__(self, owner, guild_id=123):
         self.owner = owner
+        self.id = guild_id
 
 
 class DummyMember:

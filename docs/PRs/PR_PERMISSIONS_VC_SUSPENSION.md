@@ -9,5 +9,6 @@
 - feature/permissions-vc-suspension
 
 ## Notes
-- responses for VC actions are ephemeral; details logged to mod-log
+- responses for VC actions are ephemeral; details l
+ogged to mod-log
 - tests not run here; run `pytest` with Mongo available
