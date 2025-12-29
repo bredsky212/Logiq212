@@ -32,6 +32,8 @@ modules:
     enabled: true
   staff_applications:
     enabled: true
+  ai_chat:
+    enabled: true
 
   # Disabled modules
   verification:
@@ -41,8 +43,6 @@ modules:
   leveling:
     enabled: false
   economy:
-    enabled: false
-  ai_chat:
     enabled: false
   analytics:
     enabled: false
