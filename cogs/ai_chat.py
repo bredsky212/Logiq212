@@ -19,6 +19,7 @@ from database.db_manager import DatabaseManager
 from database.models import (
     AI_DEFAULT_CHANNEL_COOLDOWN_SECONDS,
     AI_DEFAULT_MAX_CONCURRENT,
+    AI_DEFAULT_MAX_TOKENS,
     AI_DEFAULT_MODEL_ALLOWLIST,
     AI_DEFAULT_MODEL_ID,
     AI_DEFAULT_MODE,
@@ -46,7 +47,7 @@ SYSTEM_PROMPT = (
     "Do not mention system messages."
 )
 MAX_PROMPT_CHARS = 2000
-MAX_COMPLETION_TOKENS = 500
+MAX_COMPLETION_TOKENS = AI_DEFAULT_MAX_TOKENS
 TEMPERATURE = 0.7
 MAX_KEY_ATTEMPTS = 3
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30
@@ -94,6 +95,54 @@ class AIChat(commands.Cog):
             self.guild_locks[guild_id] = lock
         return lock
 
+    def _get_max_tokens_cap(self) -> int:
+        cap = self.module_config.get("max_tokens_cap", MAX_COMPLETION_TOKENS)
+        try:
+            cap_value = int(cap)
+        except (TypeError, ValueError):
+            cap_value = MAX_COMPLETION_TOKENS
+        return max(1, cap_value)
+
+    def _get_default_max_tokens(self) -> int:
+        configured = self.module_config.get("max_tokens", MAX_COMPLETION_TOKENS)
+        try:
+            configured_value = int(configured)
+        except (TypeError, ValueError):
+            configured_value = MAX_COMPLETION_TOKENS
+        cap_value = self._get_max_tokens_cap()
+        if configured_value > cap_value:
+            logger.warning(
+                "AI max_tokens config (%s) exceeds cap (%s); using cap.",
+                configured_value,
+                cap_value,
+            )
+            configured_value = cap_value
+        return max(1, configured_value)
+
+    def _resolve_max_tokens(self, settings: Dict[str, Any], model_id: str) -> int:
+        cap_value = self._get_max_tokens_cap()
+        default_tokens = settings.get("max_tokens", self._get_default_max_tokens())
+        try:
+            default_tokens = int(default_tokens)
+        except (TypeError, ValueError):
+            default_tokens = self._get_default_max_tokens()
+
+        max_tokens = default_tokens
+        model_overrides = settings.get("model_max_tokens", {})
+        if isinstance(model_overrides, dict):
+            override = model_overrides.get(model_id)
+            if override is not None:
+                try:
+                    max_tokens = int(override)
+                except (TypeError, ValueError):
+                    max_tokens = default_tokens
+
+        if max_tokens < 1:
+            max_tokens = 1
+        if max_tokens > cap_value:
+            max_tokens = cap_value
+        return max_tokens
+
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
 
@@ -137,6 +186,8 @@ class AIChat(commands.Cog):
 
     async def _get_guild_settings(self, guild_id: int) -> Dict[str, Any]:
         defaults = AIGuildSettings(guild_id=guild_id).to_dict()
+        defaults["max_tokens"] = self._get_default_max_tokens()
+        defaults["model_max_tokens"] = {}
         doc = await self.db.get_ai_guild_settings(guild_id)
         if not doc:
             return await self.db.upsert_ai_guild_settings(guild_id, defaults)
@@ -152,6 +203,8 @@ class AIChat(commands.Cog):
             "max_concurrent",
             "session_max_turns",
             "session_ttl_seconds",
+            "max_tokens",
+            "model_max_tokens",
             "model_allowlist",
             "provider_allowlist",
             "provider_denylist",
@@ -180,6 +233,38 @@ class AIChat(commands.Cog):
             allowlist.append(doc["default_model_id"])
             update["model_allowlist"] = allowlist
             doc["model_allowlist"] = allowlist
+
+        cap_value = self._get_max_tokens_cap()
+        max_tokens = doc.get("max_tokens", defaults["max_tokens"])
+        try:
+            max_tokens = int(max_tokens)
+        except (TypeError, ValueError):
+            max_tokens = defaults["max_tokens"]
+        if max_tokens < 1:
+            max_tokens = 1
+        if max_tokens > cap_value:
+            max_tokens = cap_value
+        if max_tokens != doc.get("max_tokens"):
+            update["max_tokens"] = max_tokens
+            doc["max_tokens"] = max_tokens
+
+        model_max_tokens = doc.get("model_max_tokens")
+        if not isinstance(model_max_tokens, dict):
+            model_max_tokens = {}
+        cleaned: Dict[str, int] = {}
+        for model_id, value in model_max_tokens.items():
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed < 1:
+                continue
+            if parsed > cap_value:
+                parsed = cap_value
+            cleaned[model_id] = parsed
+        if cleaned != model_max_tokens:
+            update["model_max_tokens"] = cleaned
+            doc["model_max_tokens"] = cleaned
 
         if update:
             doc = await self.db.upsert_ai_guild_settings(guild_id, update)
@@ -731,7 +816,7 @@ class AIChat(commands.Cog):
             if request_mode not in ("fast", "think"):
                 request_mode = settings.get("default_mode", AI_DEFAULT_MODE)
 
-            max_tokens = max(1, int(self.module_config.get("max_tokens", MAX_COMPLETION_TOKENS)))
+            max_tokens = self._resolve_max_tokens(settings, model_id)
             temperature = float(self.module_config.get("temperature", TEMPERATURE))
             temperature = min(max(temperature, 0.0), 2.0)
             messages = await self._build_prompt(settings, session_messages, prompt)
@@ -961,10 +1046,12 @@ class AIChat(commands.Cog):
         channel_allowed = self._is_channel_allowed(interaction.channel, allowed_channels)
         model_id = settings.get("default_model_id", AI_DEFAULT_MODEL_ID)
         mode = settings.get("default_mode", AI_DEFAULT_MODE)
+        max_tokens = self._resolve_max_tokens(settings, model_id)
 
         description = (
             f"Model: `{model_id}`\n"
             f"Mode: `{mode}`\n"
+            f"Max tokens: `{max_tokens}`\n"
             f"AI enabled: `{enabled}`\n"
             f"Channel allowed: `{channel_allowed}`"
         )
@@ -1315,6 +1402,7 @@ class AIChat(commands.Cog):
         user_cooldown_seconds="Per-user cooldown in seconds",
         channel_cooldown_seconds="Per-channel cooldown in seconds",
         max_concurrent="Max in-flight AI requests per guild",
+        max_tokens="Default max tokens for completions",
     )
     async def ai_admin_limits_set(
         self,
@@ -1322,6 +1410,7 @@ class AIChat(commands.Cog):
         user_cooldown_seconds: int,
         channel_cooldown_seconds: int,
         max_concurrent: int,
+        max_tokens: Optional[int] = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         if not await self._validate_ai_admin(interaction):
@@ -1333,22 +1422,48 @@ class AIChat(commands.Cog):
                 ephemeral=True,
             )
             return
+        if max_tokens is not None:
+            if max_tokens < 1:
+                await interaction.followup.send(
+                    embed=EmbedFactory.error("Invalid Limits", "Max tokens must be at least 1."),
+                    ephemeral=True,
+                )
+                return
+            cap_value = self._get_max_tokens_cap()
+            if max_tokens > cap_value:
+                await interaction.followup.send(
+                    embed=EmbedFactory.error(
+                        "Invalid Limits",
+                        f"Max tokens cannot exceed the cap of {cap_value}.",
+                    ),
+                    ephemeral=True,
+                )
+                return
 
-        await self.db.upsert_ai_guild_settings(
+        update = {
+            "user_cooldown_seconds": user_cooldown_seconds,
+            "channel_cooldown_seconds": channel_cooldown_seconds,
+            "max_concurrent": max_concurrent,
+            "updated_at": self._now(),
+        }
+        if max_tokens is not None:
+            update["max_tokens"] = max_tokens
+
+        updated = await self.db.upsert_ai_guild_settings(
             interaction.guild.id,
-            {
-                "user_cooldown_seconds": user_cooldown_seconds,
-                "channel_cooldown_seconds": channel_cooldown_seconds,
-                "max_concurrent": max_concurrent,
-                "updated_at": self._now(),
-            },
+            update,
         )
+        response = [
+            f"User cooldown: {user_cooldown_seconds}s",
+            f"Channel cooldown: {channel_cooldown_seconds}s",
+            f"Max concurrent: {max_concurrent}",
+        ]
+        if max_tokens is not None:
+            response.append(f"Max tokens: {updated.get('max_tokens', max_tokens)}")
         await interaction.followup.send(
             embed=EmbedFactory.success(
                 "Limits Updated",
-                f"User cooldown: {user_cooldown_seconds}s\n"
-                f"Channel cooldown: {channel_cooldown_seconds}s\n"
-                f"Max concurrent: {max_concurrent}",
+                "\n".join(response),
             ),
             ephemeral=True,
         )
@@ -1357,12 +1472,14 @@ class AIChat(commands.Cog):
     @app_commands.describe(
         model_id="OpenRouter model ID",
         confirm_paid="Confirm if this model may cost credits",
+        max_tokens="Override max tokens for this model",
     )
     async def ai_admin_model_set(
         self,
         interaction: discord.Interaction,
         model_id: str,
         confirm_paid: bool = False,
+        max_tokens: Optional[int] = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         if not await self._validate_ai_admin(interaction):
@@ -1375,6 +1492,23 @@ class AIChat(commands.Cog):
                 ephemeral=True,
             )
             return
+        if max_tokens is not None:
+            if max_tokens < 1:
+                await interaction.followup.send(
+                    embed=EmbedFactory.error("Invalid Limit", "Max tokens must be at least 1."),
+                    ephemeral=True,
+                )
+                return
+            cap_value = self._get_max_tokens_cap()
+            if max_tokens > cap_value:
+                await interaction.followup.send(
+                    embed=EmbedFactory.error(
+                        "Invalid Limit",
+                        f"Max tokens cannot exceed the cap of {cap_value}.",
+                    ),
+                    ephemeral=True,
+                )
+                return
 
         is_free = model_id.endswith(":free")
         if not is_free and not confirm_paid:
@@ -1392,17 +1526,28 @@ class AIChat(commands.Cog):
         if model_id not in allowlist:
             allowlist.append(model_id)
 
+        update = {
+            "default_model_id": model_id,
+            "model_allowlist": allowlist,
+            "updated_at": self._now(),
+        }
+        if max_tokens is not None:
+            model_max_tokens = settings.get("model_max_tokens", {})
+            if not isinstance(model_max_tokens, dict):
+                model_max_tokens = {}
+            model_max_tokens[model_id] = max_tokens
+            update["model_max_tokens"] = model_max_tokens
+
         await self.db.upsert_ai_guild_settings(
             interaction.guild.id,
-            {
-                "default_model_id": model_id,
-                "model_allowlist": allowlist,
-                "updated_at": self._now(),
-            },
+            update,
         )
 
+        suffix = ""
+        if max_tokens is not None:
+            suffix = f"\nMax tokens for this model: {max_tokens}"
         await interaction.followup.send(
-            embed=EmbedFactory.success("Model Updated", f"Default model set to `{model_id}`."),
+            embed=EmbedFactory.success("Model Updated", f"Default model set to `{model_id}`.{suffix}"),
             ephemeral=True,
         )
 

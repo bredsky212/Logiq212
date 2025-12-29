@@ -14,6 +14,7 @@ AI_DEFAULT_USER_COOLDOWN_SECONDS = 15
 AI_DEFAULT_CHANNEL_COOLDOWN_SECONDS = 5
 AI_DEFAULT_MAX_CONCURRENT = 3
 AI_DEFAULT_SESSION_MAX_TURNS = 12
+AI_DEFAULT_MAX_TOKENS = 500
 AI_SESSION_TTL_SECONDS = 86400
 AI_DEFAULT_MODEL_ALLOWLIST = [AI_DEFAULT_MODEL_ID]
 AI_DEFAULT_RPM_LIMIT = 20
@@ -240,6 +241,8 @@ class AIGuildSettings:
     max_concurrent: int = AI_DEFAULT_MAX_CONCURRENT
     session_max_turns: int = AI_DEFAULT_SESSION_MAX_TURNS
     session_ttl_seconds: int = AI_SESSION_TTL_SECONDS
+    max_tokens: int = AI_DEFAULT_MAX_TOKENS
+    model_max_tokens: Dict[str, int] = field(default_factory=dict)
     model_allowlist: List[str] = field(default_factory=lambda: list(AI_DEFAULT_MODEL_ALLOWLIST))
     provider_allowlist: List[str] = field(default_factory=list)
     provider_denylist: List[str] = field(default_factory=list)
@@ -260,6 +263,8 @@ class AIGuildSettings:
             "max_concurrent": self.max_concurrent,
             "session_max_turns": self.session_max_turns,
             "session_ttl_seconds": self.session_ttl_seconds,
+            "max_tokens": self.max_tokens,
+            "model_max_tokens": self.model_max_tokens,
             "model_allowlist": self.model_allowlist,
             "provider_allowlist": self.provider_allowlist,
             "provider_denylist": self.provider_denylist,
