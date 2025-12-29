@@ -15,6 +15,8 @@ This guide explains how to use and configure the AI chat feature powered by Open
 modules:
   ai_chat:
     enabled: true
+    max_tokens: 500
+    max_tokens_cap: 500
 ```
 2) Set encryption secret in your environment (required):
 ```
@@ -40,7 +42,7 @@ LOGIQ_AI_KEY_ENC_SECRET=your_random_secret
 7) (Optional) Set model and limits:
 ```
 /ai admin model-set model_id:z-ai/glm-4.5-air:free
-/ai admin limits-set user_cooldown_seconds:15 channel_cooldown_seconds:5 max_concurrent:3
+/ai admin limits-set user_cooldown_seconds:15 channel_cooldown_seconds:5 max_concurrent:3 max_tokens:500
 ```
 8) If commands look missing after deploy:
 ```
@@ -99,13 +101,14 @@ Manage keys (stored encrypted, never echoed back):
 
 Adjust cooldowns and concurrency:
 ```
-/ai admin limits-set user_cooldown_seconds:15 channel_cooldown_seconds:5 max_concurrent:3
+/ai admin limits-set user_cooldown_seconds:15 channel_cooldown_seconds:5 max_concurrent:3 max_tokens:500
 ```
 
 Set a model (non-free models require confirmation):
 ```
 /ai admin model-set model_id:z-ai/glm-4.5-air:free
 /ai admin model-set model_id:provider/model-id confirm_paid:true
+/ai admin model-set model_id:z-ai/glm-4.5-air:free max_tokens:500
 ```
 
 List OpenRouter models:
@@ -141,6 +144,7 @@ View current provider routing:
 - Prompts with @everyone/@here are blocked.
 - AI replies use `allowed_mentions=none` to avoid pings.
 - All AI actions require `ai.use` permission and an allowlisted channel.
+- Max tokens can be set per guild and per model, and is capped by `config.yaml` (`max_tokens_cap`).
 
 ## Troubleshooting
 - "Invalid model ID" (400): use `/ai admin models-list` and set a valid model ID.
