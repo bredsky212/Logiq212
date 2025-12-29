@@ -620,7 +620,7 @@ class AIChat(commands.Cog):
         interaction: discord.Interaction,
         prompt: str,
         mode: Optional[str],
-        private: bool,
+        private: Optional[bool],
         use_session: bool = True,
         session_active: bool = False,
     ) -> None:
@@ -707,12 +707,13 @@ class AIChat(commands.Cog):
 
         try:
             session_messages: List[Dict[str, Any]] = []
-            private_default = private
+            private_default = True if private is None else private
             session = None
             if use_session:
                 session = await self._get_session(guild.id, interaction.user.id, interaction.channel.id)
             if session:
-                private_default = session.get("private_default", private_default)
+                if private is None:
+                    private_default = session.get("private_default", private_default)
                 session_messages = session.get("messages", [])
                 session_active = session.get("active", session_active)
 
@@ -830,12 +831,17 @@ class AIChat(commands.Cog):
         mode: Optional[app_commands.Choice[str]] = None,
         private: Optional[bool] = None,
     ) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        private_effective = True if private is None else private
+        if private is None and interaction.guild is not None:
+            session = await self._get_session(interaction.guild.id, interaction.user.id, interaction.channel.id)
+            if session:
+                private_effective = session.get("private_default", private_effective)
+        await interaction.response.defer(ephemeral=private_effective, thinking=True)
         await self._run_ai_request(
             interaction,
             prompt=prompt,
             mode=mode.value if mode else None,
-            private=True if private is None else private,
+            private=private,
             use_session=True,
             session_active=False,
         )
