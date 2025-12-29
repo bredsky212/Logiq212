@@ -34,6 +34,9 @@ modules:
     enabled: true
   ai_chat:
     enabled: true
+    max_tokens: 500
+    max_tokens_cap: 500
+    temperature: 0.7
 
   # Disabled modules
   verification:
