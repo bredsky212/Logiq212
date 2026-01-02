@@ -596,8 +596,20 @@ class AIChat(commands.Cog):
 
     def _sanitize_thread_text(self, text: str) -> str:
         safe = discord.utils.escape_mentions(text)
-        safe = discord.utils.escape_markdown(safe, as_needed=True, ignore_links=True)
-        return safe
+        return self._strip_escaped_markers(safe)
+
+    def _strip_escaped_markers(self, text: str) -> str:
+        lines = text.splitlines()
+        cleaned = []
+        for line in lines:
+            if line.startswith("\\"):
+                stripped = line[1:]
+                check = stripped.lstrip()
+                if check.startswith(("-", "*", "+", ">", "#")):
+                    cleaned.append(stripped)
+                    continue
+            cleaned.append(line)
+        return "\n".join(cleaned)
 
     def _split_thread_messages(self, text: str, limit: int) -> List[str]:
         normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
