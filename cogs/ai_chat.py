@@ -53,6 +53,7 @@ MAX_KEY_ATTEMPTS = 3
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30
 DEFAULT_SERVER_ERROR_COOLDOWN_SECONDS = 20
 EMBED_CHUNK_SIZE = 3800
+MESSAGE_CHUNK_SIZE = 1900
 MAX_STATUS_TEXT = 600
 
 
@@ -627,6 +628,12 @@ class AIChat(commands.Cog):
         model: str,
     ) -> None:
         allowed_mentions = discord.AllowedMentions.none()
+        if isinstance(channel, discord.Thread):
+            chunks = self._chunk_text(response_text, MESSAGE_CHUNK_SIZE)
+            for chunk in chunks:
+                await channel.send(content=chunk, allowed_mentions=allowed_mentions)
+            return
+
         chunks = self._chunk_text(response_text, EMBED_CHUNK_SIZE)
         if len(chunks) == 1:
             embed = EmbedFactory.ai_response(chunks[0], model)
@@ -648,7 +655,10 @@ class AIChat(commands.Cog):
         channel: discord.abc.Messageable,
         embed: discord.Embed,
     ) -> None:
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none(), delete_after=12)
+        title = embed.title or "AI Notice"
+        description = embed.description or ""
+        content = title if not description else f"{title}\n{description}"
+        await channel.send(content=content, allowed_mentions=discord.AllowedMentions.none(), delete_after=12)
 
     async def _get_session(self, guild_id: int, user_id: int, channel_id: int) -> Optional[Dict[str, Any]]:
         return await self.db.get_ai_session(guild_id, user_id, channel_id)
