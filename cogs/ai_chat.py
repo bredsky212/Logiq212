@@ -617,6 +617,14 @@ class AIChat(commands.Cog):
             return [""]
 
         paragraphs = [p.strip() for p in normalized.split("\n\n") if p.strip()]
+        deduped: List[str] = []
+        last = None
+        for paragraph in paragraphs:
+            if paragraph == last:
+                continue
+            deduped.append(paragraph)
+            last = paragraph
+        paragraphs = deduped
         chunks: List[str] = []
         current = ""
         separator = "\n\n"
