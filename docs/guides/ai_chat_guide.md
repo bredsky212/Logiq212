@@ -59,6 +59,7 @@ Start a chat session (creates a thread if possible):
 ```
 /ai chat-start private:true
 ```
+If `private:true`, the bot creates a private thread (only you + admins). If `private:false`, it creates a public thread.
 
 Reset your session in the current channel:
 ```
@@ -145,6 +146,7 @@ View current provider routing:
 - AI replies use `allowed_mentions=none` to avoid pings.
 - All AI actions require `ai.use` permission and an allowlisted channel.
 - Max tokens can be set per guild and per model, and is capped by `config.yaml` (`max_tokens_cap`).
+- In AI threads, the bot replies to normal messages (no slash command required).
 
 ## Troubleshooting
 - "Invalid model ID" (400): use `/ai admin models-list` and set a valid model ID.
