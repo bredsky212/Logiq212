@@ -1259,6 +1259,67 @@ class AIChat(commands.Cog):
             embed = EmbedFactory.info("No Session", "No active AI session found for this channel.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @ai.command(name="chat-stop", description="Stop your current AI chat session.")
+    @app_commands.describe(delete="Delete the session history instead of pausing")
+    async def ai_chat_stop(self, interaction: discord.Interaction, delete: bool = False) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if interaction.guild is None:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Unavailable", "AI commands are only available in servers."),
+                ephemeral=True,
+            )
+            return
+
+        if not await self._validate_ai_use(interaction):
+            return
+
+        session = await self._get_session(interaction.guild.id, interaction.user.id, interaction.channel.id)
+        if not session:
+            session = await self.db.get_active_ai_session(interaction.guild.id, interaction.user.id)
+        if not session:
+            await interaction.followup.send(
+                embed=EmbedFactory.info("No Session", "No active AI session found."),
+                ephemeral=True,
+            )
+            return
+
+        channel_id = session.get("channel_id")
+        if delete:
+            await self._reset_session(interaction.guild.id, session["user_id"], session["channel_id"])
+        else:
+            await self._update_session(
+                interaction.guild.id,
+                session["user_id"],
+                session["channel_id"],
+                session.get("messages", []),
+                active=False,
+                private_default=session.get("private_default", True),
+            )
+
+        thread_archived = False
+        if channel_id:
+            channel = interaction.guild.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await interaction.guild.fetch_channel(channel_id)
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    channel = None
+            if isinstance(channel, discord.Thread):
+                try:
+                    await channel.edit(archived=True, locked=True, reason="AI chat stop")
+                    thread_archived = True
+                except (discord.Forbidden, discord.HTTPException):
+                    thread_archived = False
+
+        title = "Session Deleted" if delete else "Session Stopped"
+        detail = "AI session deleted." if delete else "AI session stopped (history retained)."
+        if thread_archived:
+            detail = f"{detail}\nThread archived."
+        await interaction.followup.send(
+            embed=EmbedFactory.success(title, detail),
+            ephemeral=True,
+        )
+
     @ai.command(name="model", description="Show the current AI model and status.")
     async def ai_model(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
