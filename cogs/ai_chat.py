@@ -594,6 +594,48 @@ class AIChat(commands.Cog):
             start += limit
         return chunks
 
+    def _sanitize_thread_text(self, text: str) -> str:
+        safe = discord.utils.escape_mentions(text)
+        safe = discord.utils.escape_markdown(safe, as_needed=True, ignore_links=True)
+        return safe
+
+    def _split_thread_messages(self, text: str, limit: int) -> List[str]:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not normalized:
+            return [""]
+
+        paragraphs = [p.strip() for p in normalized.split("\n\n") if p.strip()]
+        chunks: List[str] = []
+        current = ""
+        separator = "\n\n"
+
+        def flush_current() -> None:
+            nonlocal current
+            if current:
+                chunks.append(current)
+                current = ""
+
+        for paragraph in paragraphs:
+            if len(paragraph) > limit:
+                flush_current()
+                for part in self._chunk_text(paragraph, limit):
+                    chunks.append(part)
+                continue
+
+            if not current:
+                current = paragraph
+                continue
+
+            combined = f"{current}{separator}{paragraph}"
+            if len(combined) <= limit:
+                current = combined
+            else:
+                flush_current()
+                current = paragraph
+
+        flush_current()
+        return chunks
+
     def _parse_comma_list(self, value: str) -> List[str]:
         return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -629,8 +671,11 @@ class AIChat(commands.Cog):
     ) -> None:
         allowed_mentions = discord.AllowedMentions.none()
         if isinstance(channel, discord.Thread):
-            chunks = self._chunk_text(response_text, MESSAGE_CHUNK_SIZE)
+            sanitized = self._sanitize_thread_text(response_text)
+            chunks = self._split_thread_messages(sanitized, MESSAGE_CHUNK_SIZE)
             for chunk in chunks:
+                if not chunk:
+                    continue
                 await channel.send(content=chunk, allowed_mentions=allowed_mentions)
             return
 
@@ -658,7 +703,16 @@ class AIChat(commands.Cog):
         title = embed.title or "AI Notice"
         description = embed.description or ""
         content = title if not description else f"{title}\n{description}"
-        await channel.send(content=content, allowed_mentions=discord.AllowedMentions.none(), delete_after=12)
+        sanitized = self._sanitize_thread_text(content)
+        chunks = self._split_thread_messages(sanitized, MESSAGE_CHUNK_SIZE)
+        for chunk in chunks:
+            if not chunk:
+                continue
+            await channel.send(
+                content=chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+                delete_after=12,
+            )
 
     async def _get_session(self, guild_id: int, user_id: int, channel_id: int) -> Optional[Dict[str, Any]]:
         return await self.db.get_ai_session(guild_id, user_id, channel_id)
