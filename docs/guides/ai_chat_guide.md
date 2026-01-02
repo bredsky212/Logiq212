@@ -60,6 +60,7 @@ Start a chat session (creates a thread if possible):
 /ai chat-start private:true
 ```
 If `private:true`, the bot creates a private thread (only you + admins). If `private:false`, it creates a public thread.
+AI replies in threads are sent as plain messages (not embeds).
 
 Reset your session in the current channel:
 ```
