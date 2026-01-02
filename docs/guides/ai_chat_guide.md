@@ -67,6 +67,12 @@ Reset your session in the current channel:
 /ai chat-reset
 ```
 
+Stop your active session (keeps history unless delete is true):
+```
+/ai chat-stop delete:false
+/ai chat-stop delete:true
+```
+
 Show the current model and channel status:
 ```
 /ai model
