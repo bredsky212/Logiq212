@@ -977,7 +977,7 @@ class AIChat(commands.Cog):
         thread = None
         if isinstance(channel, discord.Thread):
             thread = channel
-        elif isinstance(channel, (discord.TextChannel, discord.NewsChannel)):
+        elif isinstance(channel, discord.TextChannel):
             try:
                 auto_archive = self._resolve_auto_archive_duration(interaction.guild, 1440)
                 thread = await channel.create_thread(
