@@ -184,6 +184,17 @@ class AIChat(commands.Cog):
             reason,
         )
 
+    async def _log_denial_member(self, guild_id: int, user_id: int, feature: FeatureKey, reason: str) -> None:
+        if not self.denials.should_log(guild_id, user_id, "ai", feature.value):
+            return
+        logger.warning(
+            "AI permission denied for feature=%s user=%s guild=%s reason=%s",
+            feature.value,
+            user_id,
+            guild_id,
+            reason,
+        )
+
     async def _get_guild_settings(self, guild_id: int) -> Dict[str, Any]:
         defaults = AIGuildSettings(guild_id=guild_id).to_dict()
         defaults["max_tokens"] = self._get_default_max_tokens()
@@ -609,8 +620,41 @@ class AIChat(commands.Cog):
             )
             await interaction.followup.send(embed=embed, ephemeral=private, allowed_mentions=allowed_mentions)
 
+    async def _send_ai_channel_response(
+        self,
+        channel: discord.abc.Messageable,
+        response_text: str,
+        model: str,
+    ) -> None:
+        allowed_mentions = discord.AllowedMentions.none()
+        chunks = self._chunk_text(response_text, EMBED_CHUNK_SIZE)
+        if len(chunks) == 1:
+            embed = EmbedFactory.ai_response(chunks[0], model)
+            await channel.send(embed=embed, allowed_mentions=allowed_mentions)
+            return
+
+        total = len(chunks)
+        for idx, chunk in enumerate(chunks, start=1):
+            embed = EmbedFactory.create(
+                title=f"AI Response ({idx}/{total})",
+                description=chunk,
+                color=EmbedColor.AI,
+                footer=f"Powered by {model}",
+            )
+            await channel.send(embed=embed, allowed_mentions=allowed_mentions)
+
+    async def _send_ai_thread_notice(
+        self,
+        channel: discord.abc.Messageable,
+        embed: discord.Embed,
+    ) -> None:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none(), delete_after=12)
+
     async def _get_session(self, guild_id: int, user_id: int, channel_id: int) -> Optional[Dict[str, Any]]:
         return await self.db.get_ai_session(guild_id, user_id, channel_id)
+
+    async def _get_session_by_channel(self, guild_id: int, channel_id: int) -> Optional[Dict[str, Any]]:
+        return await self.db.get_ai_session_by_channel(guild_id, channel_id)
 
     async def _update_session(
         self,
@@ -868,6 +912,148 @@ class AIChat(commands.Cog):
         finally:
             await self._release_guild_slot(guild.id)
 
+    async def _handle_ai_thread_message(self, message: discord.Message) -> None:
+        if not isinstance(message.channel, discord.Thread):
+            return
+        content = message.content or ""
+        if not content.strip() or content.startswith("/"):
+            return
+
+        session = await self._get_session_by_channel(message.guild.id, message.channel.id)
+        if not session or not session.get("active", False):
+            return
+
+        settings = await self._get_guild_settings(message.guild.id)
+        if not settings.get("enabled", False):
+            return
+
+        allowed_channels = settings.get("allowed_channel_ids", [])
+        if not self._is_channel_allowed(message.channel, allowed_channels):
+            await self._send_ai_thread_notice(
+                message.channel,
+                EmbedFactory.error("Not Allowed", "AI is disabled here; ask an admin to allow this channel."),
+            )
+            return
+
+        member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+        if member is None:
+            return
+        allowed = await self.perms.check(
+            member,
+            FeatureKey.AI_USE,
+            self._base_ai_use_check,
+            allow_admin=False,
+            require_allowlist=True,
+        )
+        if not allowed:
+            await self._log_denial_member(message.guild.id, member.id, FeatureKey.AI_USE, "ai.use")
+            await self._send_ai_thread_notice(
+                message.channel,
+                EmbedFactory.error("No Permission", "You do not have permission to use AI commands."),
+            )
+            return
+
+        if len(content) > MAX_PROMPT_CHARS:
+            await self._send_ai_thread_notice(
+                message.channel,
+                EmbedFactory.error("Prompt Too Long", f"Prompt must be under {MAX_PROMPT_CHARS} characters."),
+            )
+            return
+
+        if self._contains_mass_mentions(content):
+            await self._send_ai_thread_notice(
+                message.channel,
+                EmbedFactory.error("Mentions Blocked", "Prompts cannot include @everyone or @here."),
+            )
+            return
+
+        user_cooldown = int(settings.get("user_cooldown_seconds", AI_DEFAULT_USER_COOLDOWN_SECONDS))
+        channel_cooldown = int(settings.get("channel_cooldown_seconds", AI_DEFAULT_CHANNEL_COOLDOWN_SECONDS))
+        cooldown_error = self._check_cooldowns(
+            message.guild.id,
+            member.id,
+            message.channel.id,
+            user_cooldown,
+            channel_cooldown,
+        )
+        if cooldown_error:
+            await self._send_ai_thread_notice(message.channel, EmbedFactory.warning("Cooldown", cooldown_error))
+            return
+
+        max_concurrent = int(settings.get("max_concurrent", AI_DEFAULT_MAX_CONCURRENT))
+        if not await self._acquire_guild_slot(message.guild.id, max_concurrent):
+            await self._send_ai_thread_notice(
+                message.channel,
+                EmbedFactory.warning("Busy", "AI is busy in this server. Please try again soon."),
+            )
+            return
+
+        self._set_cooldowns(message.guild.id, member.id, message.channel.id)
+
+        try:
+            session_messages = session.get("messages", [])
+            max_turns = int(settings.get("session_max_turns", AI_DEFAULT_SESSION_MAX_TURNS))
+            session_messages = self._trim_messages(session_messages, max_turns)
+
+            model_id = settings.get("default_model_id", AI_DEFAULT_MODEL_ID)
+            model_allowlist = settings.get("model_allowlist", list(AI_DEFAULT_MODEL_ALLOWLIST))
+            if model_id not in model_allowlist:
+                model_id = AI_DEFAULT_MODEL_ID
+
+            request_mode = session.get("mode")
+            if request_mode not in ("fast", "think"):
+                request_mode = settings.get("default_mode", AI_DEFAULT_MODE)
+
+            max_tokens = self._resolve_max_tokens(settings, model_id)
+            temperature = float(self.module_config.get("temperature", TEMPERATURE))
+            temperature = min(max(temperature, 0.0), 2.0)
+            messages = await self._build_prompt(settings, session_messages, content)
+            payload = {
+                "model": model_id,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            provider_cfg = {}
+            provider_allow = settings.get("provider_allowlist", [])
+            provider_deny = settings.get("provider_denylist", [])
+            provider_order = settings.get("provider_order", [])
+            if provider_allow:
+                provider_cfg["allow"] = provider_allow
+            if provider_deny:
+                provider_cfg["deny"] = provider_deny
+            if provider_order:
+                provider_cfg["order"] = provider_order
+            if provider_cfg:
+                payload["provider"] = provider_cfg
+            if request_mode == "think":
+                payload["reasoning"] = {"effort": "high"}
+
+            response_text, error = await self._call_openrouter(message.guild.id, payload, request_mode)
+            if error or not response_text:
+                await self._send_ai_thread_notice(
+                    message.channel,
+                    EmbedFactory.error("AI Error", error or "Failed to get AI response."),
+                )
+                return
+
+            updated_messages = session_messages + [
+                {"role": "user", "content": content, "ts": self._now()},
+                {"role": "assistant", "content": response_text, "ts": self._now()},
+            ]
+            updated_messages = self._trim_messages(updated_messages, max_turns)
+            await self._update_session(
+                message.guild.id,
+                session["user_id"],
+                message.channel.id,
+                updated_messages,
+                active=True,
+                private_default=session.get("private_default", True),
+            )
+            await self._send_ai_channel_response(message.channel, response_text, model_id)
+        finally:
+            await self._release_guild_slot(message.guild.id)
+
     def _resolve_auto_archive_duration(self, guild: discord.Guild, target_minutes: int) -> int:
         supported = {60, 1440}
         if "THREE_DAY_THREAD_ARCHIVE" in guild.features:
@@ -977,19 +1163,52 @@ class AIChat(commands.Cog):
         thread = None
         if isinstance(channel, discord.Thread):
             thread = channel
+            if private and channel.type != discord.ChannelType.private_thread:
+                await interaction.followup.send(
+                    embed=EmbedFactory.error(
+                        "Private Thread Required",
+                        "This channel is not a private thread. Run /ai chat-start in a text channel to create one.",
+                    ),
+                    ephemeral=True,
+                )
+                return
         elif isinstance(channel, discord.TextChannel):
             try:
                 auto_archive = self._resolve_auto_archive_duration(interaction.guild, 1440)
-                thread = await channel.create_thread(
-                    name=f"{interaction.user.display_name} AI Chat",
-                    auto_archive_duration=auto_archive,
-                    reason="AI chat session",
+                thread_type = (
+                    discord.ChannelType.private_thread
+                    if private
+                    else discord.ChannelType.public_thread
                 )
+                thread_kwargs = {
+                    "name": f"{interaction.user.display_name} AI Chat",
+                    "auto_archive_duration": auto_archive,
+                    "type": thread_type,
+                    "reason": "AI chat session",
+                }
+                if private:
+                    thread_kwargs["invitable"] = False
+                thread = await channel.create_thread(**thread_kwargs)
+                if private:
+                    try:
+                        await thread.add_user(interaction.user)
+                    except discord.Forbidden:
+                        logger.warning("Failed to add user %s to private AI thread.", interaction.user.id)
             except discord.Forbidden:
                 thread = None
             except discord.HTTPException as exc:
                 logger.warning("Failed to create AI thread: %s", exc)
                 thread = None
+
+        if thread is None and private:
+            await interaction.followup.send(
+                embed=EmbedFactory.error(
+                    "Private Thread Unavailable",
+                    "I couldn't create a private thread here. Check permissions for private threads.",
+                ),
+                ephemeral=True,
+            )
+            return
 
         target_channel = thread or channel
         await self._update_session(
@@ -1883,6 +2102,8 @@ class AIChat(commands.Cog):
             return
         if message.author.bot or not message.guild:
             return
+
+        await self._handle_ai_thread_message(message)
 
         module_config = self.config.get("modules", {}).get("moderation", {})
         if not module_config.get("auto_mod", {}).get("toxicity_filter", False):

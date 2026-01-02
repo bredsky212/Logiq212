@@ -494,6 +494,14 @@ class DatabaseManager:
             {"guild_id": guild_id, "user_id": user_id, "channel_id": channel_id}
         )
 
+    async def get_ai_session_by_channel(self, guild_id: int, channel_id: int) -> Optional[Dict[str, Any]]:
+        """Get active AI session for a channel (thread)."""
+        if self.ai_sessions is None:
+            return None
+        return await self.ai_sessions.find_one(
+            {"guild_id": guild_id, "channel_id": channel_id, "active": True}
+        )
+
     async def upsert_ai_session(
         self,
         guild_id: int,
