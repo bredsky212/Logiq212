@@ -239,6 +239,16 @@ class Logiq(commands.Bot):
     ):
         """Global handler for app command errors to avoid timeouts"""
         log = logging.getLogger("logiq.app_commands")
+        if isinstance(error, app_commands.CheckFailure):
+            try:
+                msg = "You don't have permission to use this command."
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                log.error("Failed to send permission error response", exc_info=True)
+            return
         log.error(
             "App command error in %s: %r",
             getattr(interaction.command, "qualified_name", "unknown"),
