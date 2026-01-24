@@ -70,7 +70,7 @@ web:
   enabled: false
 
 raisehand:
-  default_turn_seconds: 60
+  default_turn_minutes: 3
   emoji: "✋"
   max_queue_display: 15
   panel_debounce_ms: 700

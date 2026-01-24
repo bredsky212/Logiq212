@@ -20,7 +20,8 @@ from utils.logs import resolve_log_channel
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TURN_SECONDS = 60
+DEFAULT_TURN_MINUTES = 3
+DEFAULT_TURN_SECONDS = DEFAULT_TURN_MINUTES * 60
 DEFAULT_EMOJI = "\U0001F44B"
 DEFAULT_ALT_EMOJI = "\U0001F590\uFE0F"
 DEFAULT_MAX_QUEUE_DISPLAY = 15
@@ -86,6 +87,19 @@ class RaiseHand(commands.Cog):
         if isinstance(value, str) and value.strip():
             return value.strip()
         return default
+
+    def _config_turn_minutes(self) -> int:
+        cfg = self.config.get("raisehand", {}) or {}
+        if "default_turn_minutes" in cfg:
+            return self._config_int("default_turn_minutes", DEFAULT_TURN_MINUTES)
+        seconds = cfg.get("default_turn_seconds")
+        if seconds is not None:
+            try:
+                seconds_value = int(seconds)
+            except (TypeError, ValueError):
+                seconds_value = DEFAULT_TURN_SECONDS
+            return max(1, (seconds_value + 59) // 60)
+        return DEFAULT_TURN_MINUTES
 
     def _ensure_utc(self, value: Optional[datetime]) -> Optional[datetime]:
         if value is None:
@@ -306,6 +320,7 @@ class RaiseHand(commands.Cog):
             if session.current_ends_at:
                 remaining = max(0, int((session.current_ends_at - self._now()).total_seconds()))
 
+        turn_minutes = max(1, (session.turn_seconds + 59) // 60)
         queue_lines = []
         for idx, user_id in enumerate(session.queue[: session.max_queue_display], start=1):
             queue_lines.append(f"{idx}. <@{user_id}>")
@@ -316,7 +331,7 @@ class RaiseHand(commands.Cog):
         fields = [
             {
                 "name": "Current Speaker",
-                "value": f"{current}" + (f" (`{remaining}s` left)" if remaining is not None else ""),
+                "value": f"{current}" + (f" (`{self._format_duration(remaining)}` left)" if remaining is not None else ""),
                 "inline": False,
             },
             {
@@ -327,7 +342,7 @@ class RaiseHand(commands.Cog):
         ]
         description = (
             f"React with {session.emoji} to join. Remove the reaction to leave.\n"
-            f"Turn duration: `{session.turn_seconds}s`"
+            f"Turn duration: `{turn_minutes} min`"
         )
         if note:
             description = f"{description}\n\n{note}"
@@ -352,6 +367,17 @@ class RaiseHand(commands.Cog):
             return await channel.fetch_message(session.panel_message_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return None
+
+    def _format_duration(self, seconds: Optional[int]) -> str:
+        if seconds is None:
+            return "0s"
+        seconds = max(0, int(seconds))
+        minutes, secs = divmod(seconds, 60)
+        if minutes <= 0:
+            return f"{secs}s"
+        if secs == 0:
+            return f"{minutes}m"
+        return f"{minutes}m {secs}s"
 
     async def _update_panel(self, session: RaiseHandSession, note: Optional[str] = None) -> None:
         message = await self._fetch_panel_message(session)
@@ -503,8 +529,8 @@ class RaiseHand(commands.Cog):
         return session, vc
 
     @raisehand.command(name="start", description="Start a raisehand speaking queue")
-    @app_commands.describe(turn_seconds="Seconds per speaker turn")
-    async def raisehand_start(self, interaction: discord.Interaction, turn_seconds: Optional[int] = None) -> None:
+    @app_commands.describe(turn_minutes="Minutes per speaker turn")
+    async def raisehand_start(self, interaction: discord.Interaction, turn_minutes: Optional[int] = None) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         if interaction.guild is None:
             await interaction.followup.send(
@@ -555,13 +581,14 @@ class RaiseHand(commands.Cog):
             )
             return
 
-        turn_seconds = turn_seconds or self._config_int("default_turn_seconds", DEFAULT_TURN_SECONDS)
-        if turn_seconds < 1:
+        turn_minutes = turn_minutes or self._config_turn_minutes()
+        if turn_minutes < 1:
             await interaction.followup.send(
-                embed=EmbedFactory.error("Invalid Duration", "Turn seconds must be at least 1."),
+                embed=EmbedFactory.error("Invalid Duration", "Turn minutes must be at least 1."),
                 ephemeral=True,
             )
             return
+        turn_seconds = turn_minutes * 60
 
         emoji = self._config_str("emoji", DEFAULT_EMOJI)
         max_queue_display = self._config_int("max_queue_display", DEFAULT_MAX_QUEUE_DISPLAY)
@@ -570,7 +597,7 @@ class RaiseHand(commands.Cog):
         panel_message = await interaction.channel.send(
             embed=EmbedFactory.create(
                 title=f"{emoji} Speaking Queue",
-                description=f"React with {emoji} to join.\nTurn duration: `{turn_seconds}s`",
+                description=f"React with {emoji} to join.\nTurn duration: `{turn_minutes} min`",
                 color=EmbedColor.INFO,
             )
         )
@@ -607,7 +634,7 @@ class RaiseHand(commands.Cog):
 
         embed = EmbedFactory.success(
             "Raisehand Started",
-            f"Session started in {vc.mention}.\nTurn duration: `{turn_seconds}s`",
+            f"Session started in {vc.mention}.\nTurn duration: `{turn_minutes} min`",
         )
         if failures:
             embed.add_field(name="Mute Failures", value=", ".join(failures), inline=False)
@@ -700,8 +727,19 @@ class RaiseHand(commands.Cog):
         )
 
     @raisehand.command(name="extend", description="Extend the current speaker's turn")
-    @app_commands.describe(extra_seconds="Extra seconds to add to the current turn")
-    async def raisehand_extend(self, interaction: discord.Interaction, extra_seconds: int) -> None:
+    @app_commands.describe(extra_minutes="Extra minutes to add to the current turn")
+    @app_commands.choices(
+        extra_minutes=[
+            app_commands.Choice(name="2 minutes", value=2),
+            app_commands.Choice(name="3 minutes", value=3),
+            app_commands.Choice(name="5 minutes", value=5),
+        ]
+    )
+    async def raisehand_extend(
+        self,
+        interaction: discord.Interaction,
+        extra_minutes: app_commands.Choice[int],
+    ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         if interaction.guild is None:
             await interaction.followup.send(
@@ -719,12 +757,7 @@ class RaiseHand(commands.Cog):
             )
             return
 
-        if extra_seconds < 1:
-            await interaction.followup.send(
-                embed=EmbedFactory.error("Invalid Duration", "Extra seconds must be at least 1."),
-                ephemeral=True,
-            )
-            return
+        extra_seconds = extra_minutes.value * 60
 
         result = await self._ensure_session(interaction)
         if not result:
@@ -744,7 +777,10 @@ class RaiseHand(commands.Cog):
         await self._persist_session(session)
 
         await interaction.followup.send(
-            embed=EmbedFactory.success("Speaker Extended", f"Added {extra_seconds}s to the current turn."),
+            embed=EmbedFactory.success(
+                "Speaker Extended",
+                f"Added {extra_minutes.value} minutes to the current turn.",
+            ),
             ephemeral=True,
         )
 
