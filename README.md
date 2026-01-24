@@ -115,10 +115,18 @@ python main.py
 - **Logging** - All actions reuse the existing moderation log channel
 - **Usage guide** - See `docs/permissions_vcmod_guide.md` for setup and examples
 
+### Raisehand Speaking Queue (Voice Channels)
+- **Timed speaking queue** - Start a session from the VC text chat
+- **Reaction-based join** - Members join the queue by reacting
+- **Auto mute/unmute** - Server-mute everyone except the moderator and current speaker
+- **Moderator controls** - Skip, extend, swap, remove, stop
+- **Usage guide** - See `docs/guides/raisehand_guide.md`
+
 ### 🔐 Permissions & Roles (Feature Keys)
 - Configure with `/perms feature-*` (Admin/Manage Guild). Admin/owner bypass feature restrictions by default; AI usage (`ai.use`) is deny-by-default and requires explicit allowlist roles.
 - Staff applications: `staffapp.template.manage`, `staffapp.review`; Tickets: `tickets.admin`, `tickets.close` (optional: `tickets.create`)
 - Moderation: `mod.warn`, `mod.warnings`, `mod.timeout`, `mod.kick`, `mod.ban`, `mod.clear`, `mod.slowmode`, `mod.lock`, `mod.nickname`; VC moderation: `mod.vc_suspend`, `mod.vc_unsuspend`
+- Raisehand: `raisehand.manage`
 - Verification & Games: `verify.config`, `games.panel.manage`
 - Roles & Economy: `roles.menu.manage`, `roles.force.assign`, `economy.admin.adjust`
 - Leveling & Giveaways: `leveling.admin.set`, `leveling.admin.reset`, `giveaway.create`, `giveaway.manage`
@@ -143,6 +151,8 @@ python main.py
       enabled: true
     vcmod:
       enabled: true
+    raisehand:
+      enabled: true
     feature_permissions:
       enabled: true
     games:
@@ -155,7 +165,7 @@ python main.py
 
 ## 🧾 Logging Channels
 - Configure a default log channel with `/setlogchannel` (also seeds `log_channels.default`).
-- Use `/setlogchannel-advanced` to route specific events to dedicated channels: `reports`, `moderation`, `vcmod`, `tickets`, `feature_permissions` (fallback to `default` if unset).
+- Use `/setlogchannel-advanced` to route specific events to dedicated channels: `reports`, `moderation`, `vcmod`, `raisehand`, `tickets`, `feature_permissions` (fallback to `default` if unset).
 
 ### 🎁 Giveaway System
 - **Button-based entry** - Easy participation
