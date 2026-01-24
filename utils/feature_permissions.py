@@ -23,6 +23,7 @@ SENSITIVE_FEATURES = {
     FeatureKey.MOD_VC_UNSUSPEND,
     FeatureKey.TICKETS_ADMIN,
     FeatureKey.STAFFAPP_TEMPLATE_MANAGE,
+    FeatureKey.RAISEHAND_MANAGE,
 }
 from utils.security import get_or_bootstrap_security
 

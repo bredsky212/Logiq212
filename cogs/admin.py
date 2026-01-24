@@ -131,6 +131,7 @@ class Admin(commands.Cog):
             app_commands.Choice(name="reports", value="reports"),
             app_commands.Choice(name="moderation", value="moderation"),
             app_commands.Choice(name="vcmod", value="vcmod"),
+            app_commands.Choice(name="raisehand", value="raisehand"),
             app_commands.Choice(name="tickets", value="tickets"),
             app_commands.Choice(name="feature_permissions", value="feature_permissions"),
         ]

@@ -58,6 +58,7 @@ _FEATURE_PREFIX_TO_COG = {
     "utility": "utility",
     "analytics": "analytics",
     "ai": "ai_chat",
+    "raisehand": "raisehand",
 }
 
 

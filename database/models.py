@@ -543,6 +543,9 @@ class FeatureKey(str, Enum):
     MOD_NICKNAME = "mod.nickname"
     REPORT_CREATE = "report.create"
 
+    # Raisehand
+    RAISEHAND_MANAGE = "raisehand.manage"
+
     # Tickets
     TICKETS_CREATE = "tickets.create"
     TICKETS_CLOSE = "tickets.close"
