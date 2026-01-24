@@ -33,6 +33,7 @@ class Logiq(commands.Bot):
         intents.message_content = True
         intents.members = True
         intents.presences = True
+        intents.reactions = True
 
         # Initialize bot
         super().__init__(

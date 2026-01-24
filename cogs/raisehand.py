@@ -68,6 +68,7 @@ class RaiseHand(commands.Cog):
             self.denials = None
         self.sessions: Dict[Tuple[int, int], RaiseHandSession] = {}
         self.config = getattr(bot, "config", {}) or {}
+        self._restore_task: Optional[asyncio.Task] = None
 
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -86,11 +87,167 @@ class RaiseHand(commands.Cog):
             return value.strip()
         return default
 
+    def _ensure_utc(self, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    def _serialize_original_mute(self, original_mute: Dict[int, bool]) -> Dict[str, bool]:
+        return {str(user_id): muted for user_id, muted in original_mute.items()}
+
+    def _deserialize_original_mute(self, stored: Dict[str, bool]) -> Dict[int, bool]:
+        cleaned: Dict[int, bool] = {}
+        for key, value in (stored or {}).items():
+            try:
+                cleaned[int(key)] = bool(value)
+            except (TypeError, ValueError):
+                continue
+        return cleaned
+
+    async def _persist_session(self, session: RaiseHandSession) -> None:
+        try:
+            await self.db.upsert_raisehand_session(
+                session.guild_id,
+                session.vc_id,
+                {
+                    "text_channel_id": session.text_channel_id,
+                    "moderator_id": session.moderator_id,
+                    "turn_seconds": session.turn_seconds,
+                    "panel_message_id": session.panel_message_id,
+                    "emoji": session.emoji,
+                    "max_queue_display": session.max_queue_display,
+                    "debounce_ms": session.debounce_ms,
+                    "queue": list(session.queue),
+                    "current_speaker_id": session.current_speaker_id,
+                    "current_ends_at": session.current_ends_at,
+                    "original_mute": self._serialize_original_mute(session.original_mute),
+                    "running": session.running,
+                    "updated_at": self._now(),
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist raisehand session guild=%s vc=%s",
+                session.guild_id,
+                session.vc_id,
+            )
+
+    async def _delete_persisted_session(self, session: RaiseHandSession) -> None:
+        try:
+            await self.db.delete_raisehand_session(session.guild_id, session.vc_id)
+        except Exception:
+            logger.exception(
+                "Failed to delete raisehand session guild=%s vc=%s",
+                session.guild_id,
+                session.vc_id,
+            )
+
+    async def cog_load(self) -> None:
+        self._restore_task = asyncio.create_task(self._restore_sessions())
+
+    def cog_unload(self) -> None:
+        if self._restore_task and not self._restore_task.done():
+            self._restore_task.cancel()
+
     def _session_key(self, guild_id: int, vc_id: int) -> Tuple[int, int]:
         return guild_id, vc_id
 
     def _get_session(self, guild_id: int, vc_id: int) -> Optional[RaiseHandSession]:
         return self.sessions.get(self._session_key(guild_id, vc_id))
+
+    async def _restore_sessions(self) -> None:
+        await self.bot.wait_until_ready()
+        try:
+            records = await self.db.list_raisehand_sessions()
+        except Exception:
+            logger.exception("Failed to load raisehand sessions from database")
+            return
+
+        for record in records:
+            guild_id = record.get("guild_id")
+            vc_id = record.get("vc_id")
+            if not guild_id or not vc_id:
+                continue
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                await self.db.delete_raisehand_session(guild_id, vc_id)
+                continue
+            channel = guild.get_channel(vc_id)
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(vc_id)
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    await self.db.delete_raisehand_session(guild_id, vc_id)
+                    continue
+            if not isinstance(channel, discord.VoiceChannel):
+                await self.db.delete_raisehand_session(guild_id, vc_id)
+                continue
+
+            panel_message_id = record.get("panel_message_id")
+            if not panel_message_id:
+                await self.db.delete_raisehand_session(guild_id, vc_id)
+                continue
+
+            moderator_id = record.get("moderator_id")
+            moderator = guild.get_member(moderator_id) if moderator_id else None
+            if not moderator or not moderator.voice or not moderator.voice.channel or moderator.voice.channel.id != vc_id:
+                await self.db.delete_raisehand_session(guild_id, vc_id)
+                continue
+
+            session = RaiseHandSession(
+                guild_id=guild_id,
+                vc_id=vc_id,
+                text_channel_id=record.get("text_channel_id", vc_id),
+                moderator_id=moderator_id,
+                turn_seconds=int(record.get("turn_seconds") or DEFAULT_TURN_SECONDS),
+                panel_message_id=panel_message_id,
+                emoji=record.get("emoji") or DEFAULT_EMOJI,
+                max_queue_display=int(record.get("max_queue_display") or DEFAULT_MAX_QUEUE_DISPLAY),
+                debounce_ms=int(record.get("debounce_ms") or DEFAULT_DEBOUNCE_MS),
+                queue=list(record.get("queue") or []),
+            )
+            session.current_speaker_id = record.get("current_speaker_id")
+            session.current_ends_at = self._ensure_utc(record.get("current_ends_at"))
+            session.original_mute = self._deserialize_original_mute(record.get("original_mute", {}))
+            session.running = bool(record.get("running", True))
+
+            self.sessions[self._session_key(guild_id, vc_id)] = session
+
+            for member in channel.members:
+                session.original_mute.setdefault(member.id, bool(member.voice and member.voice.mute))
+
+            if session.current_speaker_id:
+                speaker = guild.get_member(session.current_speaker_id)
+                if not speaker or not speaker.voice or not speaker.voice.channel or speaker.voice.channel.id != vc_id:
+                    session.current_speaker_id = None
+                    session.current_ends_at = None
+
+            for member in channel.members:
+                if member.id == session.moderator_id:
+                    continue
+                if session.current_speaker_id and member.id == session.current_speaker_id:
+                    try:
+                        await member.edit(mute=False, reason="Raisehand restore")
+                    except (discord.Forbidden, discord.HTTPException):
+                        logger.warning("Failed to unmute restored speaker %s", member.id)
+                else:
+                    try:
+                        await member.edit(mute=True, reason="Raisehand restore")
+                    except (discord.Forbidden, discord.HTTPException):
+                        logger.warning("Failed to mute restored member %s", member.id)
+
+            if session.current_speaker_id and session.current_ends_at:
+                if session.current_ends_at <= self._now():
+                    await self._advance(session, reason="restore")
+                else:
+                    self._start_timer(session)
+            elif session.queue:
+                await self._advance(session, reason="restore")
+
+            await self._update_panel(session, note="Session restored after restart.")
+            await self._persist_session(session)
 
     async def _security_locked(self, interaction: discord.Interaction, feature: FeatureKey) -> bool:
         if feature not in SENSITIVE_FEATURES:
@@ -289,6 +446,7 @@ class RaiseHand(commands.Cog):
                 self._start_timer(session)
 
         self._schedule_panel_update(session)
+        await self._persist_session(session)
         if next_member is None:
             logger.info("Raisehand advance ended (no speakers) for guild=%s vc=%s", session.guild_id, session.vc_id)
 
@@ -316,6 +474,7 @@ class RaiseHand(commands.Cog):
 
         await self._update_panel(session, note=note or "Session ended.")
         self.sessions.pop(self._session_key(session.guild_id, session.vc_id), None)
+        await self._delete_persisted_session(session)
 
     async def _ensure_session(
         self,
@@ -444,6 +603,7 @@ class RaiseHand(commands.Cog):
             original_mute=original_mute,
         )
         self.sessions[self._session_key(interaction.guild.id, vc.id)] = session
+        await self._persist_session(session)
 
         embed = EmbedFactory.success(
             "Raisehand Started",
@@ -581,6 +741,7 @@ class RaiseHand(commands.Cog):
             session.current_ends_at += timedelta(seconds=extra_seconds)
             self._start_timer(session)
         self._schedule_panel_update(session)
+        await self._persist_session(session)
 
         await interaction.followup.send(
             embed=EmbedFactory.success("Speaker Extended", f"Added {extra_seconds}s to the current turn."),
@@ -659,6 +820,7 @@ class RaiseHand(commands.Cog):
             await self._advance(session, reason="swap")
         else:
             self._schedule_panel_update(session)
+            await self._persist_session(session)
 
         await interaction.followup.send(
             embed=EmbedFactory.success("Speaker Swapped", f"{user.mention} is now speaking."),
@@ -672,6 +834,98 @@ class RaiseHand(commands.Cog):
                 color=EmbedColor.INFO,
             ),
         )
+
+    @raisehand.command(name="remove", description="Remove a user from the queue or current turn")
+    @app_commands.describe(user="User to remove from the queue")
+    async def raisehand_remove(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if interaction.guild is None:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Unavailable", "This command is only available in servers."),
+                ephemeral=True,
+            )
+            return
+
+        if await self._security_locked(interaction, FeatureKey.RAISEHAND_MANAGE):
+            return
+        if not await self._can_manage(interaction.user):
+            await interaction.followup.send(
+                embed=EmbedFactory.error("No Permission", "You do not have permission to manage raisehand."),
+                ephemeral=True,
+            )
+            return
+
+        result = await self._ensure_session(interaction)
+        if not result:
+            return
+        session, _vc = result
+
+        should_advance = False
+        async with session.lock:
+            if user.id == session.current_speaker_id:
+                current_member = interaction.guild.get_member(user.id)
+                if current_member:
+                    try:
+                        await current_member.edit(mute=True, reason="Raisehand remove")
+                    except (discord.Forbidden, discord.HTTPException):
+                        logger.warning("Failed to mute current speaker during remove")
+                session.current_speaker_id = None
+                session.current_ends_at = None
+                should_advance = True
+            elif user.id in session.queue:
+                session.queue.remove(user.id)
+            else:
+                await interaction.followup.send(
+                    embed=EmbedFactory.info("Not Found", "That user is not in the queue or speaking."),
+                    ephemeral=True,
+                )
+                return
+
+        if should_advance:
+            await self._advance(session, reason="remove")
+        else:
+            self._schedule_panel_update(session)
+            await self._persist_session(session)
+
+        await interaction.followup.send(
+            embed=EmbedFactory.success("User Removed", f"Removed {user.mention} from the session."),
+            ephemeral=True,
+        )
+        await self._log_to_mod(
+            interaction.guild,
+            EmbedFactory.create(
+                title="Raisehand Remove",
+                description=f"Removed {user.mention} by {interaction.user.mention} in <#{session.vc_id}>",
+                color=EmbedColor.WARNING,
+            ),
+        )
+
+    @raisehand.command(name="status", description="Show the current raisehand status")
+    async def raisehand_status(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if interaction.guild is None:
+            await interaction.followup.send(
+                embed=EmbedFactory.error("Unavailable", "This command is only available in servers."),
+                ephemeral=True,
+            )
+            return
+
+        if await self._security_locked(interaction, FeatureKey.RAISEHAND_MANAGE):
+            return
+        if not await self._can_manage(interaction.user):
+            await interaction.followup.send(
+                embed=EmbedFactory.error("No Permission", "You do not have permission to manage raisehand."),
+                ephemeral=True,
+            )
+            return
+
+        result = await self._ensure_session(interaction)
+        if not result:
+            return
+        session, _vc = result
+
+        embed = self._panel_embed(session)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
@@ -697,13 +951,20 @@ class RaiseHand(commands.Cog):
         if not member.voice or not member.voice.channel or member.voice.channel.id != session.vc_id:
             return
 
+        should_advance = False
         async with session.lock:
             if payload.user_id == session.current_speaker_id:
                 return
             if payload.user_id in session.queue:
                 return
             session.queue.append(payload.user_id)
-        self._schedule_panel_update(session)
+            if session.current_speaker_id is None:
+                should_advance = True
+        if should_advance:
+            await self._advance(session, reason="queue")
+        else:
+            self._schedule_panel_update(session)
+            await self._persist_session(session)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
@@ -720,12 +981,15 @@ class RaiseHand(commands.Cog):
         if payload.user_id == self.bot.user.id:
             return
 
+        changed = False
         async with session.lock:
             if payload.user_id in session.queue:
                 session.queue.remove(payload.user_id)
-            else:
-                return
+                changed = True
+        if not changed:
+            return
         self._schedule_panel_update(session)
+        await self._persist_session(session)
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -757,6 +1021,7 @@ class RaiseHand(commands.Cog):
                     await self._advance(session, reason="speaker_left")
                 else:
                     self._schedule_panel_update(session)
+                    await self._persist_session(session)
 
         if after_channel and after_channel.id != (before_channel.id if before_channel else None):
             session = self._get_session(member.guild.id, after_channel.id)
@@ -770,6 +1035,7 @@ class RaiseHand(commands.Cog):
                     except (discord.Forbidden, discord.HTTPException):
                         logger.warning("Failed to mute joining member %s in raisehand", member.id)
                 self._schedule_panel_update(session)
+                await self._persist_session(session)
 
 
 async def setup(bot: commands.Bot) -> None:

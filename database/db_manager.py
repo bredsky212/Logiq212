@@ -119,6 +119,11 @@ class DatabaseManager:
         """Access AI sessions collection"""
         return self.db.ai_sessions if self.db is not None else None
 
+    @property
+    def raisehand_sessions(self):
+        """Access raisehand sessions collection"""
+        return self.db.raisehand_sessions if self.db is not None else None
+
     async def _ensure_indexes(self) -> None:
         """Ensure required indexes are present"""
         if self.db is None:
@@ -147,6 +152,7 @@ class DatabaseManager:
             await self.db.ai_sessions.create_index([("guild_id", 1), ("user_id", 1), ("channel_id", 1)], unique=True)
             await self.db.ai_sessions.create_index([("guild_id", 1), ("user_id", 1), ("active", 1)])
             await self.db.ai_sessions.create_index([("updated_at", 1)], expireAfterSeconds=AI_SESSION_TTL_SECONDS)
+            await self.db.raisehand_sessions.create_index([("guild_id", 1), ("vc_id", 1)], unique=True)
         except Exception as e:
             logger.warning(f"Failed to ensure database indexes: {e}")
 
@@ -536,6 +542,40 @@ class DatabaseManager:
         return await self.ai_sessions.find_one(
             {"guild_id": guild_id, "user_id": user_id, "active": True}
         )
+
+    # Raisehand session operations
+    async def list_raisehand_sessions(self) -> List[Dict[str, Any]]:
+        """List all raisehand sessions."""
+        if self.raisehand_sessions is None:
+            return []
+        return await self.raisehand_sessions.find({}).to_list(length=None)
+
+    async def get_raisehand_session(self, guild_id: int, vc_id: int) -> Optional[Dict[str, Any]]:
+        """Get raisehand session for a voice channel."""
+        if self.raisehand_sessions is None:
+            return None
+        return await self.raisehand_sessions.find_one({"guild_id": guild_id, "vc_id": vc_id})
+
+    async def upsert_raisehand_session(self, guild_id: int, vc_id: int, update: Dict[str, Any]) -> Dict[str, Any]:
+        """Upsert raisehand session for a voice channel."""
+        if self.raisehand_sessions is None:
+            raise RuntimeError("raisehand_sessions collection not available")
+        payload = {"guild_id": guild_id, "vc_id": vc_id, **update}
+        payload["updated_at"] = update.get("updated_at", datetime.utcnow())
+        payload.setdefault("created_at", datetime.utcnow())
+        await self.raisehand_sessions.update_one(
+            {"guild_id": guild_id, "vc_id": vc_id},
+            {"$set": payload},
+            upsert=True,
+        )
+        return await self.get_raisehand_session(guild_id, vc_id)
+
+    async def delete_raisehand_session(self, guild_id: int, vc_id: int) -> bool:
+        """Delete raisehand session for a voice channel."""
+        if self.raisehand_sessions is None:
+            raise RuntimeError("raisehand_sessions collection not available")
+        result = await self.raisehand_sessions.delete_one({"guild_id": guild_id, "vc_id": vc_id})
+        return result.deleted_count > 0
 
     # Suspension operations
     async def create_suspension(self, data: Dict[str, Any]) -> str:
