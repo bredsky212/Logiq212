@@ -76,6 +76,15 @@ modules:
     enabled: true
     betting_enabled: true
 
+  raisehand:
+    enabled: true
+
+raisehand:
+  default_turn_seconds: 60
+  emoji: "✋"
+  max_queue_display: 15
+  panel_debounce_ms: 700
+
 web:
   enabled: true
   host: "0.0.0.0"
