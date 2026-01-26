@@ -4,7 +4,7 @@ This guide explains how to run a timed speaking queue inside a voice channel tex
 
 ## Overview
 - Starts a session per voice channel (one session per VC).
-- Posts a queue panel in the VC text chat; members join by reacting.
+- Posts a queue panel in the VC text chat; members join by reacting or sending the emoji alone.
 - Server-mutes everyone except the moderator and the current speaker.
 - Automatically rotates speakers after a fixed turn duration (minutes).
 
@@ -77,13 +77,14 @@ Remove a user from the queue (or current speaker):
 
 Show the current queue status:
 ```
-/raisehand status
+/raisehand status public:true full:true
 ```
 
 ## Behavior Notes
 - Commands must be run inside the voice channel text chat for the target VC.
 - The moderator must be connected to the same VC.
-- Joining the queue requires being in the VC and reacting with the configured emoji.
+- Joining the queue requires being in the VC and reacting with the configured emoji (or sending only the emoji as a message).
+- Users can appear more than once in the queue, but not in consecutive positions.
 - On stop, the bot restores the original server mute state for each member it touched.
 - Sessions restore after restarts when possible (if the moderator is still in the VC).
 
