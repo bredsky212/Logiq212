@@ -312,7 +312,12 @@ class RaiseHand(commands.Cog):
         voice = interaction.user.voice
         return bool(voice and voice.channel and voice.channel.id == vc.id)
 
-    def _panel_embed(self, session: RaiseHandSession, note: Optional[str] = None) -> discord.Embed:
+    def _panel_embed(
+        self,
+        session: RaiseHandSession,
+        note: Optional[str] = None,
+        queue_override: Optional[str] = None,
+    ) -> discord.Embed:
         current = "None"
         remaining = None
         if session.current_speaker_id:
@@ -321,10 +326,7 @@ class RaiseHand(commands.Cog):
                 remaining = max(0, int((session.current_ends_at - self._now()).total_seconds()))
 
         turn_minutes = max(1, (session.turn_seconds + 59) // 60)
-        queue_lines = []
-        for idx, user_id in enumerate(session.queue[: session.max_queue_display], start=1):
-            queue_lines.append(f"{idx}. <@{user_id}>")
-        extra = len(session.queue) - session.max_queue_display
+        queue_lines, extra = self._build_queue_lines(session, session.max_queue_display)
         if extra > 0:
             queue_lines.append(f"+{extra} more...")
 
@@ -336,7 +338,7 @@ class RaiseHand(commands.Cog):
             },
             {
                 "name": "Queue",
-                "value": "\n".join(queue_lines) if queue_lines else "Waiting for hands...",
+                "value": queue_override or ("\n".join(queue_lines) if queue_lines else "Waiting for hands..."),
                 "inline": False,
             },
         ]
@@ -379,6 +381,64 @@ class RaiseHand(commands.Cog):
             return f"{minutes}m"
         return f"{minutes}m {secs}s"
 
+    def _build_queue_lines(
+        self, session: RaiseHandSession, limit: Optional[int] = None
+    ) -> Tuple[List[str], int]:
+        if limit is None:
+            queue_ids = session.queue
+        else:
+            queue_ids = session.queue[:limit]
+        lines = [f"{idx}. <@{user_id}>" for idx, user_id in enumerate(queue_ids, start=1)]
+        extra = len(session.queue) - len(queue_ids)
+        return lines, extra
+
+    def _chunk_lines(self, lines: List[str], max_len: int = 1800) -> List[str]:
+        chunks: List[str] = []
+        current: List[str] = []
+        current_len = 0
+        for line in lines:
+            line_len = len(line)
+            if current and current_len + line_len + 1 > max_len:
+                chunks.append("\n".join(current))
+                current = [line]
+                current_len = line_len
+            else:
+                if current:
+                    current_len += 1
+                current.append(line)
+                current_len += line_len
+        if current:
+            chunks.append("\n".join(current))
+        return chunks
+
+    def _queue_tail_id(self, session: RaiseHandSession) -> Optional[int]:
+        if session.queue:
+            return session.queue[-1]
+        return session.current_speaker_id
+
+    def _queue_last_position(self, session: RaiseHandSession, user_id: int) -> Optional[int]:
+        for idx in range(len(session.queue) - 1, -1, -1):
+            if session.queue[idx] == user_id:
+                return idx + 1
+        return None
+
+    def _estimate_wait_seconds(self, session: RaiseHandSession, user_id: int) -> Optional[int]:
+        if session.current_speaker_id == user_id:
+            return 0
+        position = self._queue_last_position(session, user_id)
+        if position is None:
+            return None
+        remaining = 0
+        if session.current_speaker_id and session.current_ends_at:
+            remaining = max(0, int((session.current_ends_at - self._now()).total_seconds()))
+        return remaining + (position - 1) * session.turn_seconds
+
+    def _accepted_emojis(self, session: RaiseHandSession) -> set[str]:
+        emojis = {session.emoji}
+        if session.emoji in {DEFAULT_EMOJI, DEFAULT_ALT_EMOJI}:
+            emojis.update({DEFAULT_EMOJI, DEFAULT_ALT_EMOJI})
+        return emojis
+
     async def _update_panel(self, session: RaiseHandSession, note: Optional[str] = None) -> None:
         message = await self._fetch_panel_message(session)
         if not message:
@@ -389,6 +449,61 @@ class RaiseHand(commands.Cog):
             await message.edit(embed=embed)
         except discord.HTTPException:
             logger.warning("Failed to update raisehand panel for guild=%s vc=%s", session.guild_id, session.vc_id)
+
+    async def _fetch_text_channel(self, session: RaiseHandSession) -> Optional[discord.abc.Messageable]:
+        guild = self.bot.get_guild(session.guild_id)
+        if guild is None:
+            return None
+        channel = guild.get_channel(session.text_channel_id)
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(session.text_channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                return None
+        return channel
+
+    async def _repost_panel(self, session: RaiseHandSession, note: Optional[str] = None) -> bool:
+        channel = await self._fetch_text_channel(session)
+        if channel is None:
+            return False
+        old_message = await self._fetch_panel_message(session)
+        if old_message:
+            try:
+                await old_message.delete()
+            except discord.HTTPException:
+                logger.warning(
+                    "Failed to delete raisehand panel for guild=%s vc=%s",
+                    session.guild_id,
+                    session.vc_id,
+                )
+        async with session.lock:
+            embed = self._panel_embed(session, note=note)
+        try:
+            new_message = await channel.send(embed=embed)
+        except discord.HTTPException:
+            logger.warning("Failed to repost raisehand panel for guild=%s vc=%s", session.guild_id, session.vc_id)
+            return False
+        try:
+            await new_message.add_reaction(session.emoji)
+        except discord.HTTPException:
+            logger.warning("Failed to add reaction to raisehand panel for guild=%s", session.guild_id)
+        async with session.lock:
+            session.panel_message_id = new_message.id
+            session.panel_dirty = False
+        if session.panel_update_task and not session.panel_update_task.done():
+            session.panel_update_task.cancel()
+            session.panel_update_task = None
+        await self._persist_session(session)
+        return True
+
+    async def _enqueue_member(self, session: RaiseHandSession, user_id: int) -> Tuple[bool, bool, Optional[str]]:
+        async with session.lock:
+            last_in_line = self._queue_tail_id(session)
+            if last_in_line == user_id:
+                return False, False, "You are already next in line. Wait for another speaker before rejoining."
+            session.queue.append(user_id)
+            should_advance = session.current_speaker_id is None
+        return True, should_advance, None
 
     def _schedule_panel_update(self, session: RaiseHandSession) -> None:
         session.panel_dirty = True
@@ -426,15 +541,17 @@ class RaiseHand(commands.Cog):
         except asyncio.CancelledError:
             return
 
-    async def _advance(self, session: RaiseHandSession, reason: str) -> None:
+    async def _advance(self, session: RaiseHandSession, reason: str, force_repost: bool = False) -> None:
         guild = self.bot.get_guild(session.guild_id)
         if guild is None:
             return
 
+        had_speaker = False
         async with session.lock:
             if not session.running:
                 return
 
+            had_speaker = session.current_speaker_id is not None or force_repost
             if session.current_speaker_id:
                 current = guild.get_member(session.current_speaker_id)
                 if current and current.voice and current.voice.channel and current.voice.channel.id == session.vc_id:
@@ -471,8 +588,14 @@ class RaiseHand(commands.Cog):
                 session.current_ends_at = self._now() + timedelta(seconds=session.turn_seconds)
                 self._start_timer(session)
 
-        self._schedule_panel_update(session)
-        await self._persist_session(session)
+        if had_speaker:
+            reposted = await self._repost_panel(session)
+            if not reposted:
+                self._schedule_panel_update(session)
+                await self._persist_session(session)
+        else:
+            self._schedule_panel_update(session)
+            await self._persist_session(session)
         if next_member is None:
             logger.info("Raisehand advance ended (no speakers) for guild=%s vc=%s", session.guild_id, session.vc_id)
 
@@ -810,6 +933,7 @@ class RaiseHand(commands.Cog):
         session, _vc = result
 
         should_advance = False
+        force_repost = False
         async with session.lock:
             if not session.current_speaker_id:
                 await interaction.followup.send(
@@ -847,13 +971,14 @@ class RaiseHand(commands.Cog):
                 session.current_speaker_id = None
                 session.current_ends_at = None
                 should_advance = True
+                force_repost = True
             else:
                 session.current_speaker_id = user.id
                 session.current_ends_at = self._now() + timedelta(seconds=session.turn_seconds)
                 self._start_timer(session)
 
         if should_advance:
-            await self._advance(session, reason="swap")
+            await self._advance(session, reason="swap", force_repost=force_repost)
         else:
             self._schedule_panel_update(session)
             await self._persist_session(session)
@@ -897,6 +1022,7 @@ class RaiseHand(commands.Cog):
         session, _vc = result
 
         should_advance = False
+        force_repost = False
         async with session.lock:
             if user.id == session.current_speaker_id:
                 current_member = interaction.guild.get_member(user.id)
@@ -908,8 +1034,9 @@ class RaiseHand(commands.Cog):
                 session.current_speaker_id = None
                 session.current_ends_at = None
                 should_advance = True
+                force_repost = True
             elif user.id in session.queue:
-                session.queue.remove(user.id)
+                session.queue = [user_id for user_id in session.queue if user_id != user.id]
             else:
                 await interaction.followup.send(
                     embed=EmbedFactory.info("Not Found", "That user is not in the queue or speaking."),
@@ -918,7 +1045,7 @@ class RaiseHand(commands.Cog):
                 return
 
         if should_advance:
-            await self._advance(session, reason="remove")
+            await self._advance(session, reason="remove", force_repost=force_repost)
         else:
             self._schedule_panel_update(session)
             await self._persist_session(session)
@@ -937,12 +1064,19 @@ class RaiseHand(commands.Cog):
         )
 
     @raisehand.command(name="status", description="Show the current raisehand status")
-    async def raisehand_status(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
+    @app_commands.describe(public="Post the status publicly in the channel", full="Show the full queue list")
+    async def raisehand_status(
+        self,
+        interaction: discord.Interaction,
+        public: Optional[bool] = False,
+        full: Optional[bool] = False,
+    ) -> None:
+        ephemeral = not bool(public)
+        await interaction.response.defer(ephemeral=ephemeral, thinking=True)
         if interaction.guild is None:
             await interaction.followup.send(
                 embed=EmbedFactory.error("Unavailable", "This command is only available in servers."),
-                ephemeral=True,
+                ephemeral=ephemeral,
             )
             return
 
@@ -951,7 +1085,7 @@ class RaiseHand(commands.Cog):
         if not await self._can_manage(interaction.user):
             await interaction.followup.send(
                 embed=EmbedFactory.error("No Permission", "You do not have permission to manage raisehand."),
-                ephemeral=True,
+                ephemeral=ephemeral,
             )
             return
 
@@ -960,8 +1094,68 @@ class RaiseHand(commands.Cog):
             return
         session, _vc = result
 
-        embed = self._panel_embed(session)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        queue_override = None
+        queue_chunks: List[str] = []
+        if full:
+            lines, _extra = self._build_queue_lines(session, limit=None)
+            if lines:
+                queue_chunks = self._chunk_lines(lines)
+                queue_override = "Full queue posted below."
+        embed = self._panel_embed(session, queue_override=queue_override)
+        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+        if queue_chunks:
+            for index, chunk in enumerate(queue_chunks, start=1):
+                label = f"Queue (part {index}/{len(queue_chunks)})"
+                await interaction.followup.send(
+                    f"{label}\n{chunk}",
+                    ephemeral=ephemeral,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.guild is None or message.author.bot:
+            return
+        if not isinstance(message.channel, discord.VoiceChannel):
+            return
+        session = self._get_session(message.guild.id, message.channel.id)
+        if not session or not session.running:
+            return
+        content = message.content.strip()
+        if content not in self._accepted_emojis(session):
+            return
+
+        member = message.author if isinstance(message.author, discord.Member) else None
+        if member is None:
+            return
+        if not member.voice or not member.voice.channel or member.voice.channel.id != session.vc_id:
+            await message.reply(
+                "Join the voice channel to enter the queue.",
+                mention_author=False,
+            )
+            return
+
+        added, should_advance, reason = await self._enqueue_member(session, member.id)
+        if not added:
+            await message.reply(reason or "Unable to add you to the queue.", mention_author=False)
+            return
+        if should_advance:
+            await self._advance(session, reason="queue")
+        else:
+            self._schedule_panel_update(session)
+            await self._persist_session(session)
+
+        if session.current_speaker_id == member.id:
+            response = "You are up now."
+        else:
+            estimate = self._estimate_wait_seconds(session, member.id)
+            if estimate is None:
+                response = "Unable to confirm your spot in the queue. Please try again."
+            elif estimate <= 0:
+                response = "You are next in line."
+            else:
+                response = f"You are in the queue. Estimated wait: {self._format_duration(estimate)}."
+        await message.reply(response, mention_author=False)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
@@ -973,7 +1167,7 @@ class RaiseHand(commands.Cog):
         if payload.message_id != session.panel_message_id:
             return
         emoji = str(payload.emoji)
-        if emoji not in {session.emoji, DEFAULT_EMOJI, DEFAULT_ALT_EMOJI}:
+        if emoji not in self._accepted_emojis(session):
             return
         if payload.user_id == self.bot.user.id:
             return
@@ -987,15 +1181,9 @@ class RaiseHand(commands.Cog):
         if not member.voice or not member.voice.channel or member.voice.channel.id != session.vc_id:
             return
 
-        should_advance = False
-        async with session.lock:
-            if payload.user_id == session.current_speaker_id:
-                return
-            if payload.user_id in session.queue:
-                return
-            session.queue.append(payload.user_id)
-            if session.current_speaker_id is None:
-                should_advance = True
+        added, should_advance, _reason = await self._enqueue_member(session, payload.user_id)
+        if not added:
+            return
         if should_advance:
             await self._advance(session, reason="queue")
         else:
@@ -1012,16 +1200,17 @@ class RaiseHand(commands.Cog):
         if payload.message_id != session.panel_message_id:
             return
         emoji = str(payload.emoji)
-        if emoji not in {session.emoji, DEFAULT_EMOJI, DEFAULT_ALT_EMOJI}:
+        if emoji not in self._accepted_emojis(session):
             return
         if payload.user_id == self.bot.user.id:
             return
 
         changed = False
         async with session.lock:
-            if payload.user_id in session.queue:
-                session.queue.remove(payload.user_id)
-                changed = True
+            original_len = len(session.queue)
+            if original_len:
+                session.queue = [user_id for user_id in session.queue if user_id != payload.user_id]
+                changed = len(session.queue) != original_len
         if not changed:
             return
         self._schedule_panel_update(session)
@@ -1041,20 +1230,22 @@ class RaiseHand(commands.Cog):
             session = self._get_session(member.guild.id, before_channel.id)
             if session:
                 should_advance = False
+                force_repost = False
                 async with session.lock:
-                    if member.id in session.queue:
-                        session.queue.remove(member.id)
+                    if session.queue:
+                        session.queue = [user_id for user_id in session.queue if user_id != member.id]
                     if member.id == session.current_speaker_id:
                         session.current_speaker_id = None
                         session.current_ends_at = None
                         should_advance = True
+                        force_repost = True
                     if member.id == session.moderator_id:
                         should_advance = False
                 if member.id == session.moderator_id:
                     await self._stop_session(session, reason="moderator_left", note="Session ended (moderator left).")
                     return
                 if should_advance:
-                    await self._advance(session, reason="speaker_left")
+                    await self._advance(session, reason="speaker_left", force_repost=force_repost)
                 else:
                     self._schedule_panel_update(session)
                     await self._persist_session(session)
