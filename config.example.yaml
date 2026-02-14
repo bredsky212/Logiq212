@@ -59,6 +59,7 @@ modules:
     api_key: ""
     model: "gpt-4"
     max_tokens: 500
+    max_tokens_cap: 500
     temperature: 0.7
 
   tickets:
@@ -74,6 +75,15 @@ modules:
   games:
     enabled: true
     betting_enabled: true
+
+  raisehand:
+    enabled: true
+
+raisehand:
+  default_turn_minutes: 3
+  emoji: "✋"
+  max_queue_display: 15
+  panel_debounce_ms: 700
 
 web:
   enabled: true

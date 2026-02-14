@@ -206,6 +206,8 @@ Copy-Item .\config.minimal.example.yaml .\config.yaml -Force
 
 Keep `web.enabled: false` unless you deploy a web dashboard behind TLS.
 
+Raisehand is enabled in the minimal config by default. Customize it in the `raisehand` block (for example, `default_turn_minutes`, `emoji`, `max_queue_display`, `panel_debounce_ms`).
+
 ---
 
 ## 4) Discord Developer Portal Setup
@@ -218,7 +220,8 @@ Keep `web.enabled: false` unless you deploy a web dashboard behind TLS.
    * **Guild Presences (Presence Intent)**
      Discord’s privileged intents docs + FAQ: ([Support Dev Discord][7])
      (discord.py also explains how privileged intents work from the library perspective) ([discord.py][8])
-3. Invite with scopes: `bot`, `applications.commands`, and the required permissions.
+3. If you plan to use raisehand, include the **Mute Members** permission when you invite the bot.
+4. Invite with scopes: `bot`, `applications.commands`, and the required permissions.
 
 ---
 
@@ -310,7 +313,7 @@ Check logs:
 * `/setlogchannel`
 * `/setlogchannel-advanced` for:
 
-  * `reports`, `moderation`, `vcmod`, `tickets`, `feature_permissions`, `default`
+  * `reports`, `moderation`, `vcmod`, `raisehand`, `tickets`, `feature_permissions`, `default`
 
 ### 7.3 Run security bootstrap (Phase 3)
 
@@ -330,6 +333,7 @@ Sensitive features are locked by default until an admin acknowledges protected r
 * `/perms feature-deny feature:<key> role:@Role`
 * `/perms feature-clear feature:<key> role:@Role`
 * `/perms feature-reset feature:<key>`
+* Example (raisehand): `/perms feature-allow feature:raisehand.manage role:@Moderator`
 
 ---
 

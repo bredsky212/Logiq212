@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 from discord import app_commands
-from discord.app_commands.errors import CommandSignatureMismatch
+from discord.app_commands.errors import CommandSignatureMismatch, CheckFailure, CommandInvokeError
 
 from database.db_manager import DatabaseManager
 from utils.logger import BotLogger
@@ -33,6 +33,7 @@ class Logiq(commands.Bot):
         intents.message_content = True
         intents.members = True
         intents.presences = True
+        intents.reactions = True
 
         # Initialize bot
         super().__init__(
@@ -239,6 +240,26 @@ class Logiq(commands.Bot):
     ):
         """Global handler for app command errors to avoid timeouts"""
         log = logging.getLogger("logiq.app_commands")
+        if isinstance(error, CheckFailure):
+            try:
+                msg = "You don't have permission to use this command."
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                log.error("Failed to send permission error response", exc_info=True)
+            return
+        if isinstance(error, CommandInvokeError) and isinstance(error.original, CheckFailure):
+            try:
+                msg = "You don't have permission to use this command."
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                log.error("Failed to send permission error response", exc_info=True)
+            return
         log.error(
             "App command error in %s: %r",
             getattr(interaction.command, "qualified_name", "unknown"),

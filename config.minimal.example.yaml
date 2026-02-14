@@ -32,6 +32,13 @@ modules:
     enabled: true
   staff_applications:
     enabled: true
+  ai_chat:
+    enabled: true
+    max_tokens: 500
+    max_tokens_cap: 500
+    temperature: 0.7
+  raisehand:
+    enabled: true
 
   # Disabled modules
   verification:
@@ -41,8 +48,6 @@ modules:
   leveling:
     enabled: false
   economy:
-    enabled: false
-  ai_chat:
     enabled: false
   analytics:
     enabled: false
@@ -63,3 +68,9 @@ modules:
 
 web:
   enabled: false
+
+raisehand:
+  default_turn_minutes: 3
+  emoji: "✋"
+  max_queue_display: 15
+  panel_debounce_ms: 700

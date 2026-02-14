@@ -70,4 +70,5 @@ temp/
 Thumbs.db
 
 # Config
+config.yaml
 config.local.yaml

@@ -593,7 +593,7 @@ class Moderation(commands.Cog):
                     f"**Server:** {interaction.guild.name}\n**Reason:** {reason}"
                 )
                 await user.send(embed=dm_embed)
-            except discord.Forbidden:
+            except (discord.Forbidden, discord.HTTPException):
                 pass
 
             await user.ban(reason=reason, delete_message_days=delete_messages)

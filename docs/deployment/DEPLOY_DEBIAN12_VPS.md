@@ -150,6 +150,8 @@ Keep `web.enabled: false` unless you are deploying the web dashboard behind TLS.
 
 Note: the `/report` command is implemented in `cogs/moderation.py` (there is no separate `cogs/report.py`), so `modules.moderation.enabled: true` is what actually controls report availability.
 
+Raisehand is enabled in the minimal config by default. Customize it in the `raisehand` block (for example, `default_turn_minutes`, `emoji`, `max_queue_display`, `panel_debounce_ms`).
+
 ## 4) Discord Developer Portal Setup
 
 1. Go to https://discord.com/developers/applications and create an application.
@@ -161,10 +163,10 @@ Note: the `/report` command is implemented in `cogs/moderation.py` (there is no 
 4. OAuth2 → URL Generator:
    - Scopes: `bot`, `applications.commands`
    - Permissions (minimum for the “minimal” config features):
-     - Read Messages/View Channels, Send Messages, Embed Links, Read Message History
-     - Manage Channels (tickets, lock/unlock), Manage Messages (clear)
-     - Moderate Members (timeout/VC suspend), Kick Members, Ban Members
-     - Manage Nicknames (nickname moderation)
+   - Read Messages/View Channels, Send Messages, Embed Links, Read Message History
+   - Manage Channels (tickets, lock/unlock), Manage Messages (clear)
+   - Moderate Members (timeout/VC suspend), Mute Members (raisehand), Kick Members, Ban Members
+   - Manage Nicknames (nickname moderation)
 
 After inviting, ensure the **bot role is positioned high enough** to moderate regular members, but consider keeping it **below admin/protected roles** as a defense-in-depth measure.
 
@@ -239,7 +241,7 @@ The bot attempts a global sync on startup. If you need to force-refresh in a gui
 
 - `/setlogchannel` to set a default log channel.
 - `/setlogchannel-advanced` to route specific logs to dedicated channels:
-  - `reports`, `moderation`, `vcmod`, `tickets`, `feature_permissions`, `default`
+  - `reports`, `moderation`, `vcmod`, `raisehand`, `tickets`, `feature_permissions`, `default`
 
 ### 7.3 Run security bootstrap (Phase 3)
 
@@ -268,6 +270,7 @@ This creates a per-guild `guild_security` config that:
   - `/perms feature-deny feature:<key> role:@Role`
   - `/perms feature-clear feature:<key> role:@Role`
   - `/perms feature-reset feature:<key>`
+  - Example (raisehand): `/perms feature-allow feature:raisehand.manage role:@Moderator`
 
 ## 8) Operations (Updates & Safety)
 
